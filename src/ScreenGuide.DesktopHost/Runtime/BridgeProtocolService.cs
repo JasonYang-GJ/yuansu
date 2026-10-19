@@ -12,14 +12,17 @@ public sealed class BridgeServerInstance
     public string Id { get; } = Guid.NewGuid().ToString("D");
 }
 
-public sealed class BridgeProtocolService(
+public sealed partial class BridgeProtocolService(
     BridgeServerInstance serverInstance,
     BridgeSnapshotProjection snapshotProjection,
     TimeProvider timeProvider,
-    ILogger<BridgeProtocolService> logger)
+    ILogger<BridgeProtocolService> logger,
+    SessionCoordinator sessions,
+    LocalTaskEntryService tasks)
 {
     public const int ProtocolVersion = 1;
     public const string SnapshotCapability = "bridge_snapshot_v1";
+    public const string CancelCapability = "island_cancel_v1";
     private const int MaximumCollectionItems = 32;
     private const int MaximumAsciiTokenLength = 64;
     private const int MaximumSnapshotBytes = 1024 * 1024;
@@ -27,7 +30,7 @@ public sealed class BridgeProtocolService(
     private const int MaximumEventsPerBatch = 100;
     private const int MaximumEventBytes = 32 * 1024;
     private const int MaximumNegotiatedClients = 256;
-    private static readonly string[] ImplementedCapabilities = [SnapshotCapability];
+    private static readonly string[] ImplementedCapabilities = [SnapshotCapability, CancelCapability];
     private static readonly IReadOnlyDictionary<string, string> DisabledCapabilities =
         new SortedDictionary<string, string>(StringComparer.Ordinal)
         {

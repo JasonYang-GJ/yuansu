@@ -13,16 +13,19 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        _singleInstance = DesktopClientSingleInstance.TryAcquire();
-        if (_singleInstance is null)
-        {
-            await DesktopClientSingleInstance.TrySignalExistingAsync();
-            Shutdown();
-            return;
-        }
-
         try
         {
+            RuntimeDataProfile.ApplyForCurrentProcess();
+            var launch = DesktopLaunchOptions.Parse(e.Args);
+            _singleInstance = DesktopClientSingleInstance.TryAcquire();
+            if (_singleInstance is null)
+            {
+                if (!launch.Background)
+                    await DesktopClientSingleInstance.TrySignalExistingAsync(showManagement: !launch.ShowAssistant);
+                Shutdown();
+                return;
+            }
+
             DesktopClientFailureRecorder.Clear();
             DesktopClientFailureRecorder.RecordStage("starting-host");
             IDesktopApiClient apiClient = new DesktopApiClient();
@@ -60,23 +63,38 @@ public partial class App : System.Windows.Application
                 settings);
             DesktopClientFailureRecorder.RecordStage("main-window-created");
             MainWindow = window;
-            _singleInstance.SetActivationHandler(() => Dispatcher.Invoke(window.OpenDashboardFromTray));
-            _tray.OpenRequested += window.OpenDashboardFromTray;
+            if (launch.UseIsland)
+                window.ConfigureIslandSurface(BuiltInIsland.ResolveExecutable(AppContext.BaseDirectory,
+                    Environment.GetEnvironmentVariable("SCREEN_GUIDE_ISLAND_PATH")));
+            _singleInstance.SetActivationHandler(showManagement => Dispatcher.Invoke(() =>
+            {
+                if (showManagement) window.OpenDashboardFromTray();
+                else window.ShowAssistantSurface();
+            }));
+            _tray.OpenRequested += window.ShowAssistantSurface;
+            _tray.ManagementRequested += window.OpenDashboardFromTray;
+            _tray.IslandSettingsRequested += async () => await window.OpenIslandSettingsFromTrayAsync();
             _tray.NewTaskRequested += window.OpenNewTaskFromTray;
             _tray.CurrentTaskRequested += window.OpenCurrentTaskFromTray;
             _tray.CancelCurrentTaskRequested += async () => await window.CancelCurrentTaskFromTrayAsync();
             _tray.SettingsRequested += window.OpenSettingsFromTray;
             _tray.NotificationClicked += async taskId => await window.OpenTaskFromNotificationAsync(taskId);
             _tray.ExitRequested += async () => await window.ExitApplicationAsync();
-            var backgroundStart = e.Args.Any(argument =>
-                string.Equals(argument, "--background", StringComparison.OrdinalIgnoreCase));
-            var forceShow = e.Args.Any(argument =>
-                string.Equals(argument, "--show", StringComparison.OrdinalIgnoreCase));
-            if (forceShow || !backgroundStart || !settings.RunInBackground)
+            // Every entry initializes the same built-in surface. Management and background
+            // entries must never start listening as a side effect of that initialization.
+            await window.ShowAssistantAsync(launch.ShowAssistant && launch.StartListening
+                && onboardingTaskId is null && !openConversationAfterOnboarding);
+            if (launch.ShowAssistant && onboardingTaskId is null && !openConversationAfterOnboarding)
+            {
+                DesktopClientFailureRecorder.RecordStage("assistant-shown");
+            }
+            else if (!launch.Background || !settings.RunInBackground)
             {
                 window.Show();
                 DesktopClientFailureRecorder.RecordStage("main-window-shown");
             }
+
+            await window.InitializeClientAsync();
 
             if (onboardingTaskId is { } taskId)
             {

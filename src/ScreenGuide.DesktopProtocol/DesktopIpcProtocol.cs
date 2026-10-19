@@ -69,6 +69,7 @@ public static class DesktopApiMethods
     public const string DeleteMemory = "memory.delete";
     public const string BridgeHandshake = "bridge.handshake";
     public const string BridgeSnapshotGet = "bridge.snapshot.get";
+    public const string BridgeCancel = "bridge.task.cancel";
     public const string Shutdown = "system.shutdown";
 }
 

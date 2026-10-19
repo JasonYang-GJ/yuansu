@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Yuanshu Island">
+  <defs>
+    <linearGradient id="island-accent" x1="96" y1="96" x2="416" y2="416" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AF5DF"/>
+      <stop offset="1" stop-color="#39BEB6"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="#0A0D12"/>
+  <rect x="72" y="154" width="368" height="204" rx="102" fill="url(#island-accent)"/>
+  <rect x="88" y="170" width="336" height="172" rx="86" fill="#111721"/>
+  <circle cx="170" cy="256" r="40" fill="url(#island-accent)"/>
+  <path d="M242 224h116a16 16 0 0 1 0 32H242a16 16 0 0 1 0-32Zm0 48h76a16 16 0 0 1 0 32h-76a16 16 0 0 1 0-32Z" fill="#DCE9E7"/>
+</svg>

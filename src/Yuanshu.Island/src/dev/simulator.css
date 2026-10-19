@@ -1,0 +1,170 @@
+html:has(.simulator),
+body:has(.simulator),
+#root:has(.simulator) {
+  min-width: 980px;
+  min-height: 680px;
+  overflow: auto;
+  background: #0b141b;
+}
+
+.simulator {
+  --sim-line: rgba(174, 205, 207, 0.14);
+  display: grid;
+  grid-template-columns: minmax(310px, 390px) minmax(540px, 1fr);
+  min-height: 100%;
+  color: #edf5f5;
+  background:
+    radial-gradient(circle at 75% 16%, rgba(74, 130, 137, 0.12), transparent 34%),
+    #0b141b;
+}
+
+.simulator__controls {
+  padding: 34px;
+  background: rgba(16, 29, 38, 0.8);
+  border-right: 1px solid var(--sim-line);
+}
+
+.simulator__eyebrow,
+.simulator__statusbar span,
+.simulator__statusbar small {
+  color: #78b8b0;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.simulator__controls h1 {
+  margin: 8px 0 6px;
+  font-family: Bahnschrift, "Segoe UI Variable Display", sans-serif;
+  font-size: 24px;
+  font-weight: 520;
+}
+
+.simulator__controls > p {
+  margin: 0 0 28px;
+  color: #91a6ab;
+  font-size: 12px;
+}
+
+.simulator__controls section {
+  margin-top: 24px;
+}
+
+.simulator__controls h2 {
+  margin: 0 0 10px;
+  color: #b9cbcd;
+  font-size: 11px;
+  font-weight: 560;
+  letter-spacing: 0.08em;
+}
+
+.simulator__button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.simulator__scenario-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.simulator__controls button {
+  min-height: 38px;
+  padding: 0 12px;
+  color: #dbe8e8;
+  text-align: left;
+  cursor: pointer;
+  background: rgba(226, 244, 243, 0.045);
+  border: 1px solid var(--sim-line);
+  border-radius: 9px;
+}
+
+.simulator__controls button:hover {
+  background: rgba(101, 182, 170, 0.1);
+  border-color: rgba(130, 200, 190, 0.3);
+}
+
+.simulator__controls button:focus-visible {
+  outline: 2px solid rgba(128, 202, 192, 0.88);
+  outline-offset: 2px;
+}
+
+.simulator__controls .simulator__reset {
+  width: 100%;
+  margin-top: 24px;
+  color: #8fa4a8;
+  text-align: center;
+  background: transparent;
+}
+
+.simulator__stage {
+  display: grid;
+  grid-template-rows: auto 252px auto;
+  align-content: center;
+  justify-content: center;
+  padding: 46px;
+}
+
+.simulator__statusbar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  width: 420px;
+  margin-bottom: 12px;
+}
+
+.simulator__statusbar strong {
+  grid-column: 1 / -1;
+  margin-top: 7px;
+  overflow: hidden;
+  color: #cfdddd;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.simulator__statusbar small {
+  grid-column: 2;
+  grid-row: 1;
+  color: #657a7f;
+  letter-spacing: 0.04em;
+}
+
+.simulator__preview {
+  position: relative;
+  width: 420px;
+  height: 252px;
+  overflow: hidden;
+  border-radius: 23px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.32);
+}
+
+.simulator__history {
+  width: 420px;
+  min-height: 112px;
+  padding: 15px 16px 12px 34px;
+  margin: 16px 0 0;
+  color: #71878b;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.7;
+  background: rgba(17, 31, 40, 0.48);
+  border: 1px solid var(--sim-line);
+  border-radius: 11px;
+}
+
+@media (max-width: 1050px) {
+  .simulator {
+    grid-template-columns: 330px 1fr;
+  }
+
+  .simulator__controls {
+    padding: 26px;
+  }
+
+  .simulator__stage {
+    padding: 32px;
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Yuanshu Island 主窗口所需的最小 Tauri 核心能力",
+  "windows": ["main", "panel"],
+  "permissions": ["core:default"]
+}

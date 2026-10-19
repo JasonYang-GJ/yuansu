@@ -60,7 +60,12 @@ public static class WindowIdentityContract
     }
 }
 
-public sealed record DesktopAutomationResult(bool Verified, string Summary, string? TechnicalDetail = null);
+public sealed record DesktopAutomationResult(bool Verified, string Summary, string? TechnicalDetail = null)
+{
+    // Call-local readback of the input actually submitted. Never serialized or used for
+    // a later write. A failed receipt must not be replaced by discovering another input.
+    internal Func<ForegroundWindowSnapshot, string, CancellationToken, bool>? VerifySubmittedInput { get; init; }
+}
 
 public static class DesktopSearchErrorCodes
 {
@@ -127,9 +132,19 @@ internal sealed record DesktopSearchControlSnapshot(
     bool SupportsValuePattern,
     bool HasKeyboardFocus,
     DesktopSearchBounds Bounds,
-    string Value);
+    string Value,
+    string NativeSearchIdentity = "",
+    bool HasNativeSearchSemantics = false,
+    bool NativeSearchUsesContainer = false,
+    bool NativeSearchContainerPending = false);
 
 internal sealed record DesktopSearchControl(object NativeReference, DesktopSearchControlSnapshot Snapshot);
+
+internal interface IPreparedNativeSearchAutomation
+{
+    DesktopAutomationResult SearchWithPreparationLocator(ForegroundWindowSnapshot window, string query,
+        DesktopSearchControl? locator, CancellationToken cancellationToken);
+}
 
 internal interface IDesktopSearchAutomationDriver
 {
@@ -145,6 +160,12 @@ internal interface IDesktopSearchAutomationDriver
 
     void Focus(DesktopSearchControl control);
 
+    void Focus(DesktopSearchControl control, Action validateAtFocusBoundary)
+    {
+        validateAtFocusBoundary();
+        Focus(control);
+    }
+
     void SetValue(DesktopSearchControl control, string value);
 
     void SubmitEnter(DesktopSearchControl control, Action validateAtSendBoundary);
@@ -156,8 +177,12 @@ internal sealed class SafeForegroundSearchExecutor(
 {
     private const int MinimumConfidence = 100;
 
-    public DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query)
+    internal static bool IsReliableCandidate(DesktopSearchControlSnapshot snapshot, long expectedWindowHandle) =>
+        IsSafe(snapshot, expectedWindowHandle) && Score(snapshot) >= MinimumConfidence;
+
+    public DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(expectedWindow);
         var normalizedQuery = DesktopSearchQuery.NormalizeAndValidate(query);
 
@@ -184,7 +209,18 @@ internal sealed class SafeForegroundSearchExecutor(
         }
 
         RequireWindowAndForeground(expectedWindow);
-        var safeCandidates = discovered
+        cancellationToken.ThrowIfCancellationRequested();
+        // Multiple UIA proxies may describe one IA2 node. Merge only independently bound native identities.
+        var uniqueControls = discovered.GroupBy(control => string.IsNullOrEmpty(control.Snapshot.NativeSearchIdentity)
+                ? "uia:" + control.Snapshot.RuntimeId : control.Snapshot.NativeSearchIdentity)
+            .Select(group =>
+            {
+                var first = group.First();
+                if (group.Any(item => (item.Snapshot with { RuntimeId = first.Snapshot.RuntimeId }) != first.Snapshot))
+                    throw Changed();
+                return first;
+            });
+        var safeCandidates = uniqueControls
             .Where(control => IsSafe(control.Snapshot, expectedWindow.WindowHandle))
             .Select(control => new ScoredControl(control, Score(control.Snapshot)))
             .ToArray();
@@ -214,7 +250,12 @@ internal sealed class SafeForegroundSearchExecutor(
 
         try
         {
-            driver.Focus(selected);
+            cancellationToken.ThrowIfCancellationRequested();
+            driver.Focus(selected, () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                RequireWindowAndForeground(expectedWindow);
+            });
             RequireWindowAndForeground(expectedWindow);
             var beforeWrite = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
             if (!beforeWrite.HasKeyboardFocus)
@@ -222,15 +263,28 @@ internal sealed class SafeForegroundSearchExecutor(
                 throw FocusChanged();
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             driver.SetValue(selected, normalizedQuery);
-            RequireWindowAndForeground(expectedWindow);
-            var afterWrite = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
-            if (!afterWrite.HasKeyboardFocus)
+            DesktopSearchControlSnapshot afterWrite;
+            var readbackStarted = Stopwatch.GetTimestamp();
+            do
             {
-                throw FocusChanged();
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                RequireWindowAndForeground(expectedWindow);
+                afterWrite = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle, allowPendingSearchContainer: true);
+                if (!afterWrite.HasKeyboardFocus) throw FocusChanged();
+                if (!(bound.HasNativeSearchSemantics && afterWrite.NativeSearchContainerPending)
+                    && string.Equals(afterWrite.Value, normalizedQuery, StringComparison.Ordinal)) break;
+                // CEF acknowledges ValuePattern.SetValue before its renderer exposes the new value.
+                // Wait only for this independently bound search input; never type or submit twice.
+                if (!bound.HasNativeSearchSemantics || string.IsNullOrEmpty(bound.NativeSearchIdentity)
+                    || Stopwatch.GetElapsedTime(readbackStarted) >= TimeSpan.FromSeconds(1)) break;
+                if (cancellationToken.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(50)))
+                    cancellationToken.ThrowIfCancellationRequested();
+            } while (true);
 
-            if (!string.Equals(afterWrite.Value, normalizedQuery, StringComparison.Ordinal))
+            if (bound.HasNativeSearchSemantics && afterWrite.NativeSearchContainerPending
+                || !string.Equals(afterWrite.Value, normalizedQuery, StringComparison.Ordinal))
             {
                 throw new DesktopSearchException(
                     DesktopSearchErrorCodes.WriteVerificationFailed,
@@ -253,6 +307,7 @@ internal sealed class SafeForegroundSearchExecutor(
 
             driver.SubmitEnter(selected, () =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 RequireWindowAndForeground(expectedWindow);
                 var atSendBoundary = ReadAndRequireBoundTarget(
                     selected,
@@ -287,7 +342,34 @@ internal sealed class SafeForegroundSearchExecutor(
         return new DesktopAutomationResult(
             true,
             "已确认内容写入唯一识别的搜索框并提交；搜索结果页面尚未验证。",
-            $"UniqueCandidate=true; Confidence={highestScore}; ExactValueVerified=true; SubmitCount=1");
+            $"UniqueCandidate=true; Confidence={highestScore}; ExactValueVerified=true; SubmitCount=1")
+        {
+            VerifySubmittedInput = bound.HasNativeSearchSemantics && bound.NativeSearchIdentity.Length > 0
+                ? VerifySubmittedInput : null
+        };
+
+        bool VerifySubmittedInput(ForegroundWindowSnapshot currentWindow, string expectedQuery, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            // Navigation may change the title; no window/process identity may change.
+            if (expectedQuery != normalizedQuery || !WindowIdentityContract.Matches(expectedWindow,
+                    currentWindow with { WindowTitle = expectedWindow.WindowTitle })) return false;
+            try
+            {
+                RequireWindowAndForeground(currentWindow);
+                var current = ReadAndRequireBoundTarget(selected, bound, expectedWindow.WindowHandle);
+                token.ThrowIfCancellationRequested();
+                RequireWindowAndForeground(currentWindow);
+                return IsReliableCandidate(current, expectedWindow.WindowHandle)
+                    && current.HasNativeSearchSemantics && !current.NativeSearchContainerPending
+                    && current.Value == normalizedQuery;
+            }
+            catch (Exception exception) when (IsVolatileAutomationFailure(exception))
+            {
+                token.ThrowIfCancellationRequested();
+                return false;
+            }
+        }
     }
 
     private void RequireWindow(ForegroundWindowSnapshot expectedWindow) =>
@@ -307,7 +389,8 @@ internal sealed class SafeForegroundSearchExecutor(
     private DesktopSearchControlSnapshot ReadAndRequireBoundTarget(
         DesktopSearchControl control,
         DesktopSearchControlSnapshot bound,
-        long expectedWindowHandle)
+        long expectedWindowHandle,
+        bool allowPendingSearchContainer = false)
     {
         DesktopSearchControlSnapshot current;
         try
@@ -319,13 +402,23 @@ internal sealed class SafeForegroundSearchExecutor(
             throw Changed();
         }
 
+        var sameNativeInput = bound.HasNativeSearchSemantics
+            && !string.IsNullOrEmpty(bound.NativeSearchIdentity)
+            && string.Equals(bound.NativeSearchIdentity, current.NativeSearchIdentity, StringComparison.Ordinal);
+        var pendingContainer = allowPendingSearchContainer && sameNativeInput && bound.NativeSearchUsesContainer
+            && current.NativeSearchUsesContainer && current.NativeSearchContainerPending && !current.HasNativeSearchSemantics;
+        var independentlyBoundSearch = sameNativeInput && (current.HasNativeSearchSemantics || pendingContainer);
         if (current.OwnerWindowHandle != expectedWindowHandle
-            || !string.Equals(current.RuntimeId, bound.RuntimeId, StringComparison.Ordinal)
-            || current.Bounds != bound.Bounds
-            || !string.Equals(current.Name, bound.Name, StringComparison.Ordinal)
+            || !independentlyBoundSearch && !string.Equals(current.RuntimeId, bound.RuntimeId, StringComparison.Ordinal)
+            || !independentlyBoundSearch && current.Bounds != bound.Bounds
+            || (!independentlyBoundSearch || bound.NativeSearchUsesContainer) && !string.Equals(current.Name, bound.Name, StringComparison.Ordinal)
             || !string.Equals(current.AutomationId, bound.AutomationId, StringComparison.Ordinal)
             || !string.Equals(current.HelpText, bound.HelpText, StringComparison.Ordinal)
             || !string.Equals(current.LabeledBy, bound.LabeledBy, StringComparison.Ordinal)
+            || !string.Equals(current.NativeSearchIdentity, bound.NativeSearchIdentity, StringComparison.Ordinal)
+            || !pendingContainer && current.HasNativeSearchSemantics != bound.HasNativeSearchSemantics
+            || current.NativeSearchUsesContainer != bound.NativeSearchUsesContainer
+            || bound.HasNativeSearchSemantics && current.NativeSearchContainerPending && !pendingContainer
             || !IsSafe(current, expectedWindowHandle))
         {
             throw Changed();
@@ -345,7 +438,8 @@ internal sealed class SafeForegroundSearchExecutor(
         && snapshot.Bounds.IsUsable;
 
     private static int Score(DesktopSearchControlSnapshot snapshot) =>
-        ScoreEvidence(snapshot.Name, 20)
+        (snapshot.HasNativeSearchSemantics && !string.IsNullOrEmpty(snapshot.NativeSearchIdentity) ? 140 : 0)
+        + ScoreEvidence(snapshot.Name, 20)
         + ScoreEvidence(snapshot.LabeledBy, 20)
         + ScoreEvidence(snapshot.AutomationId, 10)
         + ScoreEvidence(snapshot.HelpText, 0);
@@ -357,6 +451,8 @@ internal sealed class SafeForegroundSearchExecutor(
         {
             return 0;
         }
+
+        if (normalized.Equals("search", StringComparison.OrdinalIgnoreCase)) return 100 + sourceBonus;
 
         var strongPhrases = new[]
         {
@@ -408,6 +504,12 @@ public interface IForegroundWindowContextProvider
 public interface IReliableDesktopAutomation
 {
     DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query);
+
+    DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Search(expectedWindow, query);
+    }
 
     DesktopAutomationResult Describe(ForegroundWindowSnapshot expectedWindow);
 }
@@ -554,26 +656,50 @@ public sealed class ForegroundWindowTracker : IForegroundWindowContextProvider, 
     private static extern int GetWindowTextLength(IntPtr hWnd);
 }
 
-public sealed class WindowsUiAutomationService : IReliableDesktopAutomation
+public sealed class WindowsUiAutomationService : IReliableDesktopAutomation, IPreparedNativeSearchAutomation
 {
     private readonly IForegroundWindowContextProvider _foregroundWindows;
     private readonly SafeForegroundSearchExecutor _searchExecutor;
+    private readonly bool _usesDefaultNativeDriver;
 
     public WindowsUiAutomationService(IForegroundWindowContextProvider foregroundWindows)
-        : this(foregroundWindows, new WindowsDesktopSearchAutomationDriver())
+        : this(foregroundWindows, new WindowsDesktopSearchAutomationDriver(), usesDefaultNativeDriver: true)
     {
     }
 
     internal WindowsUiAutomationService(
         IForegroundWindowContextProvider foregroundWindows,
         IDesktopSearchAutomationDriver searchDriver)
+        : this(foregroundWindows, searchDriver, usesDefaultNativeDriver: false)
+    {
+    }
+
+    private WindowsUiAutomationService(IForegroundWindowContextProvider foregroundWindows,
+        IDesktopSearchAutomationDriver searchDriver, bool usesDefaultNativeDriver)
     {
         _foregroundWindows = foregroundWindows;
         _searchExecutor = new SafeForegroundSearchExecutor(foregroundWindows, searchDriver);
+        _usesDefaultNativeDriver = usesDefaultNativeDriver;
     }
 
     public DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query)
         => _searchExecutor.Search(expectedWindow, query);
+
+    public DesktopAutomationResult Search(ForegroundWindowSnapshot expectedWindow, string query, CancellationToken cancellationToken)
+        => _searchExecutor.Search(expectedWindow, query, cancellationToken);
+
+    DesktopAutomationResult IPreparedNativeSearchAutomation.SearchWithPreparationLocator(
+        ForegroundWindowSnapshot window, string query, DesktopSearchControl? locator, CancellationToken cancellationToken)
+        => SearchWithPreparationLocator(window, query, locator, cancellationToken);
+
+    internal DesktopAutomationResult SearchWithPreparationLocator(ForegroundWindowSnapshot window, string query,
+        DesktopSearchControl? locator, CancellationToken cancellationToken)
+        // A per-call native driver may use the reference only as a locator. Never replace
+        // an injected driver/decorator or retain a mutable locator in this singleton service.
+        => _usesDefaultNativeDriver && locator is not null
+            ? new SafeForegroundSearchExecutor(_foregroundWindows, new WindowsDesktopSearchAutomationDriver(locator))
+                .Search(window, query, cancellationToken)
+            : _searchExecutor.Search(window, query, cancellationToken);
 
     public DesktopAutomationResult Describe(ForegroundWindowSnapshot expectedWindow)
     {
@@ -631,6 +757,11 @@ public sealed class WindowsUiAutomationService : IReliableDesktopAutomation
 
 internal class WindowsDesktopSearchAutomationDriver : IDesktopSearchAutomationDriver
 {
+    private DesktopSearchControl? _preparationLocator;
+
+    internal WindowsDesktopSearchAutomationDriver(DesktopSearchControl? preparationLocator = null)
+        => _preparationLocator = preparationLocator;
+
     public bool IsWindow(long windowHandle) =>
         windowHandle != 0 && NativeIsWindow(new IntPtr(windowHandle));
 
@@ -639,36 +770,265 @@ internal class WindowsDesktopSearchAutomationDriver : IDesktopSearchAutomationDr
 
     public virtual long GetForegroundWindowHandle() => GetForegroundWindow().ToInt64();
 
-    public IReadOnlyList<DesktopSearchControl> Discover(long windowHandle)
+    public IReadOnlyList<DesktopSearchControl> Discover(long windowHandle) => Discover(windowHandle, nativePreparation: false);
+
+    // Preparation is read-only and retried by the bounded readiness loop. During CEF startup,
+    // a missing/mismatched native-to-UIA binding must not trigger an expensive whole-page
+    // legacy-proxy traversal. Read the actual UIA/native binding, but do not enumerate the
+    // entire page just to wait for it. These samples are readiness hints, not uniqueness
+    // proofs or input authority. Actual Search independently uses full Discover.
+    internal IReadOnlyList<DesktopSearchControl> DiscoverNativePreparation(long windowHandle) =>
+        Discover(windowHandle, nativePreparation: true);
+
+    internal Func<long, IReadOnlyList<DesktopSearchControl>> CreateNativePreparationProbe() =>
+        CreateReadOnlyPreparationProbe(DiscoverNativePreparation, Read);
+
+    internal static Func<long, IReadOnlyList<DesktopSearchControl>> CreateReadOnlyPreparationProbe(
+        Func<long, IReadOnlyList<DesktopSearchControl>> discover,
+        Func<DesktopSearchControl, DesktopSearchControlSnapshot> read)
     {
+        // Only the caller's one readiness wait owns these references. Every sample reads
+        // current properties and parent/native binding again. A final stable reference may
+        // locate the input later; Search must independently rebuild its token and proof.
+        long sampledWindow = 0;
+        IReadOnlyList<DesktopSearchControl> sampled = [];
+        return window =>
+        {
+            if (sampledWindow != window) { sampledWindow = window; sampled = []; }
+            if (sampled.Count > 0)
+            {
+                try
+                {
+                    var current = sampled.Select(control => control with { Snapshot = read(control) }).ToArray();
+                    if (current.Any(control => control.Snapshot.OwnerWindowHandle != window))
+                    { sampled = []; return []; }
+                    sampled = current;
+                    return current;
+                }
+                catch (Exception exception) when (exception is ElementNotAvailableException or COMException
+                    or InvalidOperationException or ArgumentException or Win32Exception)
+                { sampled = []; }
+            }
+            sampled = discover(window);
+            return sampled;
+        };
+    }
+
+    private IReadOnlyList<DesktopSearchControl> Discover(long windowHandle, bool nativePreparation)
+    {
+        var locator = nativePreparation ? null : Interlocked.Exchange(ref _preparationLocator, null);
+        var legacyRoots = LegacyBrowserSearchSemantics.Open(windowHandle);
         var root = AutomationElement.FromHandle(new IntPtr(windowHandle))
             ?? throw new ElementNotAvailableException();
         var rootRuntimeId = RuntimeId(root);
         var condition = new PropertyCondition(
             AutomationElement.ControlTypeProperty,
             ControlType.Edit);
-        var elements = root.FindAll(TreeScope.Descendants, condition);
         var result = new List<DesktopSearchControl>();
-        foreach (AutomationElement element in elements)
+        // Query native renderer roots directly. The top-level legacy proxy can expose each DOM node twice
+        // and traverse the entire page twice; native parent/child ownership is rechecked on every read.
+        var discoveryRoots = legacyRoots.Select(item => AutomationElement.FromHandle(new IntPtr(item.Handle))).ToArray();
+        foreach (var discoveryRoot in discoveryRoots.Length == 0 ? [root] : discoveryRoots)
         {
-            try
+            var nativeRoot = legacyRoots.SingleOrDefault(item => item.Handle == discoveryRoot.Current.NativeWindowHandle);
+            DesktopSearchControl? ReadInput(AutomationElement inputRoot)
             {
-                var token = new AutomationToken(root, rootRuntimeId, element, windowHandle);
-                result.Add(new DesktopSearchControl(token, ReadToken(token)));
+                var element = inputRoot.FindFirst(TreeScope.Descendants, condition);
+                if (element is null) return null;
+                var token = new AutomationToken(inputRoot, RuntimeId(inputRoot), element, windowHandle, legacyRoots);
+                return new DesktopSearchControl(token, ReadToken(token));
             }
-            catch (ElementNotAvailableException)
+            DesktopSearchControl? ReadFirstInput() => ReadFirstSearchInput(
+                nativePreparation && discoveryRoots.Length > 0, () => ReadInput(discoveryRoot),
+                () => { _ = root.FindFirst(TreeScope.Descendants, condition); });
+            DesktopSearchControl? ReadLocator(string nativeIdentity) => TryReadPreparationLocator(nativeIdentity, windowHandle,
+                () => locator?.NativeReference is AutomationToken token && token.Element.Current.ControlType == ControlType.Edit,
+                () =>
+                {
+                    var previous = Token(locator!);
+                    if (previous.WindowHandle != windowHandle) return null;
+                    var previousRootHandle = previous.Root.Current.NativeWindowHandle;
+                    // Top-level preparation proxies remain bound to a fresh top root;
+                    // renderer proxies remain bound to their own freshly opened renderer.
+                    var currentRoot = previousRootHandle == windowHandle ? root : discoveryRoot;
+                    var currentRootId = RuntimeId(currentRoot);
+                    if (previousRootHandle != currentRoot.Current.NativeWindowHandle
+                        || previous.RootRuntimeId != currentRootId || RuntimeId(previous.Root) != previous.RootRuntimeId
+                        || RuntimeId(previous.Element) != locator!.Snapshot.RuntimeId) return null;
+                    var token = new AutomationToken(currentRoot, currentRootId, previous.Element, windowHandle, legacyRoots);
+                    return new DesktopSearchControl(token, ReadToken(token));
+                });
+            if (nativePreparation)
             {
-                // A disappearing control is omitted; later phases fail closed on the bound control.
+                if (nativeRoot is not null && ReadFirstInput() is { } hint) result.Add(hint);
+                continue;
+            }
+            if (nativeRoot is not null && TryReadSoleNativeEditWithRetry(
+                () => LegacyBrowserSearchSemantics.ReadNativeEditProof(nativeRoot, windowHandle),
+                ReadFirstInput, windowHandle, locator is null ? null : ReadLocator) is { } single)
+            {
+                result.Add(single);
+                continue;
+            }
+            foreach (AutomationElement element in discoveryRoot.FindAll(TreeScope.Descendants, condition))
+            {
+                try
+                {
+                    var token = new AutomationToken(discoveryRoot, RuntimeId(discoveryRoot), element, windowHandle, legacyRoots);
+                    result.Add(new DesktopSearchControl(token, ReadToken(token)));
+                }
+                catch (ElementNotAvailableException)
+                {
+                    // A disappearing control is omitted; later phases fail closed on the bound control.
+                }
             }
         }
 
+        if (!nativePreparation && result.Count == 0 && discoveryRoots.Length > 0)
+            foreach (AutomationElement element in root.FindAll(TreeScope.Descendants, condition))
+            {
+                try {
+                    var token = new AutomationToken(root, rootRuntimeId, element, windowHandle, legacyRoots);
+                    result.Add(new DesktopSearchControl(token, ReadToken(token)));
+                }
+                catch (ElementNotAvailableException) { }
+            }
+
         return result;
+    }
+
+    internal static DesktopSearchControl? TryReadSoleNativeEditWithRetry(
+        Func<LegacyBrowserSearchSemantics.NativeEditProof> readCompleteNativeTree,
+        Func<DesktopSearchControl?> readFirstUiaEdit, long windowHandle,
+        Func<string, DesktopSearchControl?>? readPreparationLocator = null)
+    {
+        string? identity = null;
+        return TryReadSoleNativeEdit(() =>
+        {
+            var proof = readCompleteNativeTree();
+            // CEF may replace a node during startup. Only an incomplete read gets one
+            // fresh, complete proof; known absence/ambiguity never retries into authority.
+            if (proof.State == LegacyBrowserSearchSemantics.NativeEditProofState.Incomplete)
+                proof = readCompleteNativeTree();
+            return identity = proof.State == LegacyBrowserSearchSemantics.NativeEditProofState.Unique ? proof.Identity : null;
+        }, () =>
+        {
+            DesktopSearchControl? candidate = null;
+            try { candidate = readPreparationLocator?.Invoke(identity!); }
+            catch (Exception exception) when (IsUnavailableLocator(exception)) { }
+            return candidate ?? readFirstUiaEdit();
+        }, windowHandle);
+    }
+
+    internal static DesktopSearchControl? ReadFirstSearchInput(bool allowTopPriming,
+        Func<DesktopSearchControl?> readRenderer, Action primeTopProvider)
+    {
+        var candidate = readRenderer();
+        // A cold renderer may need its containing UIA provider initialized. Discard the
+        // top query result; the next read-only sample must reacquire the renderer input.
+        if (candidate is null && allowTopPriming) primeTopProvider();
+        return candidate;
+    }
+
+    internal static DesktopSearchControl? TryReadPreparationLocator(string nativeIdentity, long windowHandle,
+        Func<bool> isCurrentEdit, Func<DesktopSearchControl?> readFreshToken)
+    {
+        try
+        {
+            // FindFirst used to enforce ControlType.Edit. A retained reference must enforce
+            // that live condition too, before rebuilding its token with the current roots.
+            if (!isCurrentEdit()) return null;
+            var current = readFreshToken();
+            return current is not null && current.Snapshot.OwnerWindowHandle == windowHandle
+                && current.Snapshot.NativeSearchIdentity == nativeIdentity && nativeIdentity.Length > 0
+                && current.Snapshot.HasNativeSearchSemantics && !current.Snapshot.NativeSearchContainerPending
+                && SafeForegroundSearchExecutor.IsReliableCandidate(current.Snapshot, windowHandle) ? current : null;
+        }
+        catch (Exception exception) when (IsUnavailableLocator(exception)) { return null; }
+    }
+
+    private static bool IsUnavailableLocator(Exception exception) => exception is ElementNotAvailableException or COMException
+        or InvalidOperationException or ArgumentException or Win32Exception;
+
+    internal static DesktopSearchControl? TryReadSoleNativeEdit(Func<string?> readCompleteNativeTree,
+        Func<DesktopSearchControl?> readFirstUiaEdit, long windowHandle, bool primeUiaFirst = false)
+    {
+        try
+        {
+            // FindFirst requests the actual UIA descendant provider while CEF is starting.
+            // FromHandle alone can leave its native document tree uninitialized. The result
+            // is only a candidate; the complete native proof below remains mandatory.
+            var control = primeUiaFirst ? readFirstUiaEdit() : null;
+            var identity = readCompleteNativeTree();
+            if (string.IsNullOrEmpty(identity)) return null;
+            if (!primeUiaFirst) control = readFirstUiaEdit();
+            // A native uniqueness proof is only an acceleration hint. The UIA control must still
+            // pass the existing live parent-chain and native-input binding, with the exact same ID.
+            return control?.Snapshot.OwnerWindowHandle == windowHandle
+                && control.Snapshot.NativeSearchIdentity == identity ? control : null;
+        }
+        catch (Exception exception) when (exception is ElementNotAvailableException or COMException)
+        { return null; }
     }
 
     public DesktopSearchControlSnapshot Read(DesktopSearchControl control) =>
         ReadToken(Token(control));
 
-    public void Focus(DesktopSearchControl control) => Token(control).Element.SetFocus();
+    public void Focus(DesktopSearchControl control) => Focus(control, () => { });
+
+    public void Focus(DesktopSearchControl control, Action validateAtFocusBoundary)
+    {
+        var token = Token(control);
+        var snapshot = ReadToken(token);
+        if (snapshot.HasKeyboardFocus) return;
+        validateAtFocusBoundary();
+        FocusWithNativeFallback(snapshot.HasNativeSearchSemantics && snapshot.NativeSearchIdentity.Length > 0,
+            () => token.Element.SetFocus(),
+            () =>
+            {
+                validateAtFocusBoundary();
+                return LegacyBrowserSearchSemantics.TryFocus(token.Element, token.WindowHandle, token.LegacyRoots, snapshot.NativeSearchIdentity);
+            },
+            () => TryInvokeBoundSearchFocus(token, snapshot, validateAtFocusBoundary));
+    }
+
+    internal static void FocusWithNativeFallback(bool independentlyBoundSearch, Action focus, Func<bool> focusNative,
+        Func<bool>? invokeBoundSearch = null)
+    {
+        try { focus(); }
+        catch (InvalidOperationException) when (independentlyBoundSearch)
+        {
+            if (!focusNative() && !(invokeBoundSearch?.Invoke() ?? false))
+                throw new ElementNotAvailableException("原生搜索框没有确认取得输入焦点。");
+        }
+    }
+
+    private bool TryInvokeBoundSearchFocus(AutomationToken token, DesktopSearchControlSnapshot expected, Action validateAtFocusBoundary)
+    {
+        bool IsBound(DesktopSearchControlSnapshot current) => current.HasNativeSearchSemantics
+            && current.NativeSearchUsesContainer == expected.NativeSearchUsesContainer
+            && (!expected.NativeSearchUsesContainer || current.Name == expected.Name)
+            && current.NativeSearchIdentity == expected.NativeSearchIdentity && expected.NativeSearchIdentity.Length > 0
+            && current.OwnerWindowHandle == expected.OwnerWindowHandle
+            && current.AutomationId == expected.AutomationId && current.HelpText == expected.HelpText && current.LabeledBy == expected.LabeledBy
+            && SafeForegroundSearchExecutor.IsReliableCandidate(current, expected.OwnerWindowHandle);
+        if (!IsBound(ReadToken(token)) || GetForegroundWindowHandle() != expected.OwnerWindowHandle
+            || !token.Element.TryGetCurrentPattern(InvokePattern.Pattern, out var rawPattern)) return false;
+        validateAtFocusBoundary();
+        if (!IsBound(ReadToken(token)) || GetForegroundWindowHandle() != expected.OwnerWindowHandle) return false;
+        validateAtFocusBoundary();
+        ((InvokePattern)rawPattern).Invoke();
+        // Invoke is only on the same proven search input; it is not a result click or a pointer action.
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            validateAtFocusBoundary();
+            var current = ReadToken(token);
+            if (!IsBound(current) || GetForegroundWindowHandle() != expected.OwnerWindowHandle) return false;
+            if (current.HasKeyboardFocus) return true;
+            if (attempt < 5) Thread.Sleep(50);
+        }
+        return false;
+    }
 
     public void SetValue(DesktopSearchControl control, string value)
     {
@@ -703,6 +1063,7 @@ internal class WindowsDesktopSearchAutomationDriver : IDesktopSearchAutomationDr
         var value = supportsValue ? ((ValuePattern)rawPattern).Current.Value ?? string.Empty : string.Empty;
         var isReadOnly = supportsValue && ((ValuePattern)rawPattern).Current.IsReadOnly;
         var bounds = element.Current.BoundingRectangle;
+        var semantics = LegacyBrowserSearchSemantics.Read(element, token.WindowHandle, token.LegacyRoots);
         return new DesktopSearchControlSnapshot(
             RuntimeId(element),
             token.WindowHandle,
@@ -715,13 +1076,19 @@ internal class WindowsDesktopSearchAutomationDriver : IDesktopSearchAutomationDr
             element.Current.IsPassword,
             isReadOnly,
             supportsValue,
-            element.Current.HasKeyboardFocus,
+            element.Current.HasKeyboardFocus || semantics?.HasKeyboardFocus == true,
             new DesktopSearchBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height),
-            value);
+            value,
+            semantics?.Identity ?? "",
+            semantics?.IsSearch ?? false,
+            semantics?.UsesSearchContainer ?? false,
+            semantics?.SearchContainerPending ?? false);
     }
 
     private static bool IsDescendantOfBoundRoot(AutomationToken token)
     {
+        var rootHandle = new IntPtr(token.Root.Current.NativeWindowHandle);
+        if (rootHandle == IntPtr.Zero || GetAncestor(rootHandle, 2).ToInt64() != token.WindowHandle) return false;
         if (!string.Equals(RuntimeId(token.Root), token.RootRuntimeId, StringComparison.Ordinal))
         {
             return false;
@@ -755,9 +1122,13 @@ internal class WindowsDesktopSearchAutomationDriver : IDesktopSearchAutomationDr
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
     private sealed record AutomationToken(
         AutomationElement Root,
         string RootRuntimeId,
         AutomationElement Element,
-        long WindowHandle);
+        long WindowHandle,
+        IReadOnlyList<LegacyBrowserSearchSemantics.Root> LegacyRoots);
 }

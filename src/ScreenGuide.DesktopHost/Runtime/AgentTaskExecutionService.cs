@@ -340,7 +340,8 @@ public sealed class AgentTaskExecutionService(
         Guid taskId,
         Guid sourceDeviceId,
         Guid? commandId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? expectedVersion = null)
     {
         var run = await store.GetAgentRunByTaskAsync(taskId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("任务没有 Agent Run。");
@@ -356,7 +357,8 @@ public sealed class AgentTaskExecutionService(
                 taskId,
                 sourceDeviceId,
                 commandId,
-                cancellationToken)
+                cancellationToken,
+                expectedVersion)
             .ConfigureAwait(false);
         if (!accepted)
         {

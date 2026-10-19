@@ -1,4 +1,52 @@
-# 元枢当前架构（V0.7.0 候选及 V0.6.0 冻结背景）
+# 元枢当前架构（V0.8.0 合并候选及历史冻结背景）
+
+> 2026-10-19 语音修复：仅在本地待命时，将完整的“元枢/元书/原书/袁叔/袁书”及对应“你好”形式归为唤醒词，解决普通离线识别词表缺“枢”的问题；普通对话保留原文字。规范词同时经过现有回声过滤，过渡状态与前后识别重置防止同段重放。唤醒只改变本地接收模式，不创建 Host 请求或授权动作；新请求仍经 SessionCoordinator。撤回未通过真人验收的额外声学唤醒组件，不改变原 ASR 端点与麦克风授权。首个无 Session 的 Voice Turn 由原 Host 回执绑定一次性播报资格。详见 [真人语音与模型验收](docs/UNIFIED_PRODUCT_REAL_USAGE.md)。
+
+> 2026-10-19 完整合并：`src/Yuanshu.Island` 是同仓组件，`build-yuanshu.ps1` 从源码构建 Client、Host 和 Island 并交给唯一 Inno 安装器。Client 按安装相对路径加载 `island/yuanshu-island.exe`，为所有启动入口建立同一显示桥；Tauri 不再注册托盘或独立自启。元枢拥有托盘、语音授权、子进程生命周期；岛通过现有协议投影状态。激活参数只打开已有实例。用户路径配置在安装目录外且不含凭据，隔离环境变量优先。详见 [统一构建](docs/UNIFIED_PRODUCT_BUILD.md)。
+
+> 内置岛取消入口使用原 `island_cancel_v1` 协商能力和 `bridge.task.cancel`，检查服务实例、客户端、请求身份、精确目标与版本。Session 操作锁和 Task 存储事务再次核对版本后才取消；持久幂等键绑定服务/客户端/请求，重复失败不会升级成成功。实际执行仍使用原 SessionCoordinator 与任务取消链，不新增数据库结构或扩大动作权限。
+
+> Client 将自己刚启动的 Island 加入专用 Windows Job（由操作系统管理的子进程组），主程序异常结束时自动回收这个窗口及其子进程。Host 保持原有独立后台任务恢复规则；该进程组不包含用户应用或编程任务。正常退出仍先执行现有停止与窗口关闭流程。
+
+> 搜索框焦点回执实验保留但未接入当前交付路径。合并版 `DesktopAutomationServices.cs` 与此前实际桌面版源码哈希一致，避免一次产品合并携带未通过门禁的性能实验。差异及完整草稿保留方式见 [实验记录](docs/experiments/README.md)。
+
+> 2026-10-17 发行查询重叠：仅精确绑定且为绝对 `cloudmusic.exe` 目标的最新歌曲请求，在真实启动返回正进程 ID 后通过调用范围回调开始匿名查询；无启动身份则等到可见窗口验证完成，兼容实现仍先完成原 Open。桌面路径保持串行，外层关联取消覆盖 Open 和准备，失败/取消观察网络任务并拒绝晚结果输入。结果核对沿用同一单调计时器，前 1.5 秒等待 75ms，此后 200ms；准备间隔100ms、后续操作间隔200ms、12秒结果时限及所有目标/回执/页面规则保留。无新增 IPC、数据库或 Session 状态。见 [本批实现与证据](docs/ASSISTANT_METADATA_RESULTS_LATENCY.md)。
+
+> 2026-10-17 并发目录与搜索定位：`GetApplications(out bool)` 比较等待锁前后成功发布的不可变目录快照，应用偏好解析不再重复扫描刚完成的并发发现；普通解析、旧缓存未命中和失败刷新仍按原规则处理。准备探测仅保留 renderer 的只读定位提示，顶层 FindFirst 仍只作初始化；每次 Open/Prepare/Search 清除并一次消费定位引用。默认原生自动化的每次 Search 创建独立驱动，重新打开根、完整证明唯一性、检查当前 Edit 类型、重建 token 并复读实时父链/原生身份；失效即回退原发现，注入实现不被替换。既有前台、取消、写入回读、提交和结果页检查不变，无新协议/数据库/会话状态。见 [本批诊断与实测](docs/ASSISTANT_SEARCH_FIVE_SECONDS.md)。
+
+> 2026-10-17 第二批提速：`ResolveApplicationPreference` 仅省去新目录的立即二次发现，已有缓存未命中仍刷新。每次 `WaitForNativeSearchInput` 独立创建只读 probe，后续样本复读同一 UIA 引用的实时属性/原生绑定，100ms 轮询、两次稳定身份，不产生写入权限。实际 `SafeForegroundSearchExecutor` 仍完整发现与唯一性校验；成功后返回仅内部可见的只读委托，捕获原窗口生命期、查询及已写入控件。`ReadResults` 有回执时只能复读该控件，失败不换控件；无回执才用原发现路径。新 Open/Search 先清空回执，结果页面校验、IPC/schema/会话状态不变。见 [本批边界与证据](docs/ASSISTANT_SEARCH_FAST.md)。
+
+> 2026-10-17 搜索准备：网易云 `WaitForNativeSearchInput` 使用只读 `DiscoverNativePreparation`；先请求 renderer 的首个 UIA Edit，无输入时向顶层发起一次 FindFirst 初始化，每轮重取原生根。输入候选仍须完整原生唯一性证明及精确身份匹配，随后两次稳定采样；准备阶段不再回退整页 FindAll。实际 Search/ReadResults 的完整 Discover、前台/目标绑定、停止和输入边界不变。多编辑框或无法证明唯一性的页面保守失败，不扩大动作权限。详见 [分段诊断与验收](docs/ASSISTANT_SEARCH_READINESS.md)。
+
+> 2026-10-17 搜索发现候选：`ReadSoleEditIdentity` 使用 `ReadEditIdentityRole` 逐节点读取 IA2 身份、窗口归属与角色，省去唯一性证明不使用的属性/状态读取；完整子树、根前后复核和所有输入计数保留。原 `ReadNode`、UIA 初始化/回退、最终输入检查、Session 进度投影不变，无新 IPC/schema。离线回归通过，真实 CEF 冷启动行为待测，详见 [冷启动优化记录](docs/ASSISTANT_COLD_SEARCH_OPTIMIZATION.md)。
+
+> 2026-10-11 实时执行：`VoiceCommandSegments` 仅在同一监听/识别代际内临时组装有明确语法连接的短语，不保存目标权限。`ApplicationSearchProgressChannel` 以调用范围传递执行枚举，SessionCoordinator 核验当前 Session、原 Turn、OperationId、取消和终态后更新现有 ResultSummary；Client/Island 直接投影，不创建第二任务状态。窗口验证成功后，发行资料查询与只读搜索准备重叠进行，提交前复验完整身份。详见 [自然语音执行与实时进度](docs/ASSISTANT_LIVE_PROGRESS.md)。
+
+> 2026-10-11 搜索提速与发行语义：`LatestMusicArtist` 仅由明确、未引号的单歌手最新歌曲请求生成，并随 `ApplicationSearchWorkflow` 进入 canonical 授权作用域；普通 null 分支保持原表示。`LatestMusicResolver` 通过固定匿名 HTTPS 目录读取日期/艺术家/作品，12秒总限时、响应大小上限、不跟随重定向，不使用聊天模型或凭据。网络结果只派生搜索词，返回后重新检查原窗口与取消状态；结果附公开来源、作品日期和平台版本核实状态。Chromium 搜索发现以完整有界 MSAA/IA2 枚举证明唯一输入后快速定位，保留最终 UIA 身份/写入验证，不完整即回退。精确绑定的已开普通 exe 直接激活。无新增 Session/Turn 状态、IPC 或数据库版本。实测与范围见 [提速与发行日期查找](docs/ASSISTANT_FAST_LATEST_MUSIC.md)。
+
+> 自然口语路由修正：`ApplicationSearchRequest` 识别本机目标加顺序搜索、省略打开及有限重复口语前缀；`DesktopFileRequest` 与其共享明确序列边界，仍保留文件字面量优先。`InstalledApplicationCatalog` 在完整注册名匹配之后处理桌面修饰语。所有请求继续进入原 SessionCoordinator 和已绑定应用搜索作用域，未知应用/歧义/缺查询不退回普通聊天。详见 [本批修复记录](docs/ASSISTANT_COMMAND_ROUTING_FIX.md)。
+
+> 贴边收纳修正：`AssistantPlacement` 将休息态停靠球的原生可见窗口裁到直径三分之一，React 在窄窗口内保持 44×44 圆形并按对应边对齐裁切。原生窗口整体仍在所在显示器工作区内，不在相邻显示器或任务栏留下隐藏部分的输入区域。保存结构、沿边中心、完整展开、焦点归还与转写回执不变。见 [贴边收纳](docs/ASSISTANT_ISLAND_EDGE_PEEK.md)。
+
+> 自由摆放候选：Island 原生 `AssistantPlacement` 持有显示器相对位置、停靠边、拖动代际及模式切换等待；只有明确用户拖动完成才保存独立位置文件。前端将 compact 投影为胶囊或贴边球，4 像素拖动阈值与点击互斥，拖动中冻结真实已显示版本并保持其心跳。休息态接受鼠标但不自动激活，自动展开穿透，手动展开可交互。Host/Session/语音授权和独立 Island 四态行为不变。下方固定定位与休息態穿透为此前候选历史，见 [拖动与位置记忆](docs/ASSISTANT_ISLAND_DRAG_PLACEMENT.md)。
+
+> 顶部输入修正：Island 原生 `AssistantSurface` 独立管理展示/交互与快捷键可用状态，版本单调递增；自动展示默认使用原生鼠标穿透并禁止焦点激活。只有托盘、快捷键或 Client 的 `--show-controls` 重复激活进入可操作面板；失焦、收起、Esc 释放交互，不改变语音/Session。激活参数不能作为新独立进程入口。此状态不扩展 Host 协议和动作权限，见 [鼠标穿透修正](docs/ASSISTANT_ISLAND_INPUT_PASS_THROUGH.md)。
+
+> 2026-10-11 灵动岛：`MainWindow.Island` 启动真实 Tauri 子进程，`AssistantIslandBridge` 通过随机、当前用户专用且绑定子进程身份的 Named Pipe 发送临时显示投影。React 展开窗口并显示最终转写后回传精确版本回执；Client 再把原输入交给现有 SessionCoordinator。三秒可见性心跳失效或窗口退出即撤销待提交语音并停止麦克风。此展示协议独立于 Host IPC v12，不新增会话、Provider、数据库或动作权限；控制按钮只调用现有 Client 操作。详见 [整合契约](docs/ASSISTANT_ISLAND_INTEGRATION.md)。
+
+> 2026-10-11 后续功能：`VoiceReceptionGate` 只管理本地接收模式，按监听代际、原生识别代际与切换归属拒绝旧语音及旧播报完成；休息/唤醒词不提交 Host 或 Provider，待命仍开麦并在界面明示，停止撤销本次监听。原生切换更换录音对象并排空旧回调。`FindDesktopFile` 独立于 `OpenFile`，只在桌面第一层进行有界名称枚举；打开路径在原 Turn 中冻结并于确认时复验原指纹。小球记忆入口只打开已有显式本机记忆设置，不增加记忆选择、保存或出站行为。无新增 IPC/schema，SessionCoordinator 仍是唯一会话来源。详见 [后续功能实现与验收](docs/ASSISTANT_FOLLOWUP_20261011.md)。
+
+> 2026-10-11 应用搜索连续流程：`ApplicationSearchRequest` 只解析语言，Host 从安装目录解析并冻结应用 ID、启动绑定、查询和后续动作。`desktop.application.search` 使用一次性精确作用域，由原 SessionCoordinator 执行一个 Turn；原生层复核目标进程与前台、唯一搜索输入、一次提交和对应结果。结果读取与后续动作分开验证，模型文字、同名窗口和结果标题不授予操作权限。NetEase 原生结果读取来自其实际可访问性结构；无可靠媒体标识时拒绝播放。详见 [应用搜索实现](docs/APPLICATION_SEARCH_WORKFLOW.md)。
+
+> 2026-09-22 悬浮入口：AssistantOrbWindow 为纯展示窗口，MainWindow 继续持有现有客户端协调逻辑，Host SessionCoordinator 仍是唯一会话来源。MainWindow 初始化已与 Loaded 解耦且幂等；球、管理页、托盘共用相同的语音/Session 投影。DesktopLaunchOptions 区分手动助手、管理、后台和暂停预览；语音只在可见助手的手动入口或明确开始事件启动。单实例激活区分显示球/管理，不隐式恢复已暂停监听；退出使用有界清理结束当前 Client。无 IPC/schema 或凭据合同改变。
+
+> 2026-09-22 语音生命周期修复：DesktopClient 的 VoiceSessionController 仅管理本次麦克风授权、启停/取消与监听代际，不保存第二套 Session/Turn。主页显式按钮开启，所有识别后的请求仍进入 Host SessionCoordinator。原生监听器按麦克风对象和取消状态核对结果来源，UI 排队回调再比对监听代际；状态刷新只展示已记录状态。配置修复为仓库外同一 Windows 用户的既有 DPAPI 密文/设置恢复，不增加凭据存储方式，不改 IPC/schema。
+
+> 同批语音回复补充：VoiceReplyGate 仅保存一次临时播报资格，绑定本窗口提交的 Turn ID、Session/Coordinator 身份和监听代际；Host 的 Completed/Failed 投影触发一次本地朗读。历史、文字输入和其他窗口提交不自动播报。停止、关闭、新输入、话题/Host 切换撤销旧队列和播报资格；播放取消源按实例归属释放，旧播放完成不能清理新播放。WindowsSpeechOutput 将加入队列和取消串行化，并拒绝已取消请求；播放错误保留为可见提示。无新增 Provider 调用、麦克风隐式授权、IPC 或数据库状态。
+
+> 2026-09-22 通用应用路由：确定性规划器区分明确本机应用与网站；对未指定网站的同名请求，Host 先在受信任的 InstalledApplicationCatalog 解析应用，成功后带 PreferInstalledApplication 本地上下文重新规划，并保留既有应用 ID、目标哈希与单次授权。仅 NotFound 可保留已知网站计划，歧义/安全拒绝向上传递。目录按“完整登记名 → 受限口语前后缀 → 原有别名及唯一匹配”解析；未知名称沿用一次发现刷新。应用名不交给模型猜可执行路径，不新增 IPC/schema。
+
+> 2026-09-22 开发候选：`DesktopFileRequest → AssistantCommandService → IDesktopFileCatalog` 在本机匹配明确桌面文件名，解析出的路径保存在原 Session Turn 的 FilePath 中，确认续接前检查原计划及文件元数据。仍走现有 OpenFile 权限与单次确认，不新增 IPC/schema。`WindowsDesktopSearchAutomationDriver` 通过绑定窗口的 renderer MSAA/IA2 元数据补充 UIA 搜索语义，以原生窗口/uniqueID 识别重复代理；实际输入仍使用 UIA ValuePattern、精确回读和提交边界检查。该层不接网络、模型、截图、远程调试或鼠标坐标操作。具名搜索不匹配当前窗口时，用已注册应用的精确进程路径补充名称；无法匹配则等待用户切换窗口。
 
 > 2026-09-12：当前产品源码 `19081d3` 已含只读 Bridge、应用发现/搜索和指针文字回答候选；Desktop IPC v12、SQLite schema v11。以下旧阶段段落仍描述对应阶段的历史合同。上述安装身份保留；本地 Gate4C 修复候选已实现经用户批准的两次临时快捷键交互，捕获仍严格少于 10 秒，冻结文字阅读/单次发送为 120 秒；发送前只验证原窗口身份，不再取图。Client 仅保存一次UI操作及其精确取消委托，SessionCoordinator 仍为唯一协调入口；关闭要等Host确认取消。详见 [修复记录](docs/V0.7.0_GATE4C_REPAIR.md)，真实使用闭环仍待验收。
 

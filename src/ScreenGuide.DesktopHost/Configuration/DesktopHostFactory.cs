@@ -150,6 +150,10 @@ public static class DesktopHostFactory
         builder.Services.AddSingleton<ForegroundWindowTracker>();
         builder.Services.AddSingleton<IForegroundWindowContextProvider>(services =>
             services.GetRequiredService<ForegroundWindowTracker>());
+        builder.Services.AddSingleton<ILatestMusicResolver, LatestMusicResolver>();
+        builder.Services.AddSingleton<ApplicationSearchProgressChannel>();
+        builder.Services.AddSingleton<IApplicationSearchProgressSink>(services => services.GetRequiredService<ApplicationSearchProgressChannel>());
+        builder.Services.AddSingleton<IApplicationSearchWorkflowAutomation, WindowsApplicationSearchWorkflowAutomation>();
         builder.Services.AddSingleton<ISensitiveWindowPolicy, WindowsSensitiveWindowPolicy>();
         builder.Services.AddSingleton<IWindowCaptureTargetVerifier, WindowsWindowCaptureTargetVerifier>();
         builder.Services.AddSingleton<WindowsGraphicsCaptureBackend>();
@@ -195,12 +199,14 @@ public static class DesktopHostFactory
             services.GetRequiredService<PointerRegionUnderstandingService>(),
             services.GetServices<ISessionMemoryConsentPublicationObserver>(),
             services.GetRequiredService<IForegroundWindowContextProvider>(),
-            services.GetRequiredService<TimeProvider>()));
+            services.GetRequiredService<TimeProvider>(),
+            services.GetRequiredService<ApplicationSearchProgressChannel>()));
         builder.Services.AddSingleton<BridgeServerInstance>();
         builder.Services.AddSingleton<BridgeSnapshotProjection>();
         builder.Services.AddSingleton<BridgeProtocolService>();
         builder.Services.AddSingleton<DesktopActionEntryService>();
         builder.Services.AddSingleton<AssistantCommandService>();
+        builder.Services.AddSingleton<IDesktopFileCatalog, DesktopFileCatalog>();
         builder.Services.AddSingleton<ProjectInspector>();
         builder.Services.AddSingleton<DesktopHostState>();
         builder.Services.AddSingleton<DesktopHostRuntime>();

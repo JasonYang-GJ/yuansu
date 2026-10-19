@@ -1619,7 +1619,8 @@ public sealed class SqliteTaskStore : ILocalTaskStore
         Guid taskId,
         Guid sourceDeviceId,
         Guid? commandId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? expectedVersion = null)
     {
         await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction();
@@ -1630,6 +1631,8 @@ public sealed class SqliteTaskStore : ILocalTaskStore
             cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("任务不存在。");
         var now = DateTimeOffset.UtcNow;
+        if (expectedVersion is { } expected && current.Version != expected)
+            throw new InvalidOperationException("entity_version_mismatch");
         if (current.Status == TaskStatus.CancellationRequested || TaskStateMachine.IsTerminal(current.Status))
         {
             await InsertAuditAsync(

@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="ScreenGuide.Skills.Windows.Tests" />
+    <InternalsVisibleTo Include="ScreenGuide.DesktopHost.Tests" />
   </ItemGroup>
 
 </Project>

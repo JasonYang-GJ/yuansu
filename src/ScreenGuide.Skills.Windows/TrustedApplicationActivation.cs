@@ -53,7 +53,8 @@ internal static class TrustedApplicationActivation
         KnownDesktopApplication application,
         IApplicationActivationRuntime runtime,
         TimeSpan windowDiscoveryTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? launchInitiated = null)
     {
         ArgumentNullException.ThrowIfNull(application);
         ArgumentNullException.ThrowIfNull(runtime);
@@ -66,18 +67,21 @@ internal static class TrustedApplicationActivation
                 throw TargetChanged("计算器启动目标不再是受信任的 Windows 系统启动器，本次没有打开程序。");
             }
 
-            return OpenTrustedCalculator(
+            var opened = OpenTrustedCalculator(
                 application,
                 runtime,
                 windowDiscoveryTimeout,
                 cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            launchInitiated?.Invoke();
+            return opened;
         }
 
         return OpenSingleProcessApplication(
             application,
             runtime,
             windowDiscoveryTimeout,
-            cancellationToken);
+            cancellationToken, launchInitiated);
     }
 
     private static VisibleDesktopLaunchResult OpenTrustedCalculator(
@@ -141,7 +145,8 @@ internal static class TrustedApplicationActivation
         KnownDesktopApplication application,
         IApplicationActivationRuntime runtime,
         TimeSpan windowDiscoveryTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? launchInitiated)
     {
         var appsFolderTarget = application.LaunchTarget.StartsWith(
             "shell:AppsFolder\\", StringComparison.OrdinalIgnoreCase);
@@ -159,8 +164,25 @@ internal static class TrustedApplicationActivation
                 ArgumentList = { application.LaunchTarget }
             }
             : new ProcessStartInfo(application.LaunchTarget) { UseShellExecute = true };
-        var before = EnumerateMatching(runtime, processName, appsFolderTarget)
-            .ToDictionary(item => item.Handle, item => item.Title);
+        var existing = EnumerateMatching(runtime, processName, appsFolderTarget)
+            .Where(item => settingsTarget || MatchesRegisteredTarget(application, item.Process))
+            .ToArray();
+        if (!appsFolderTarget && !settingsTarget && existing is [var alreadyOpen]
+            && alreadyOpen.Handle != IntPtr.Zero && alreadyOpen.Process.IsRunning
+            && alreadyOpen.Process.ProcessId > 0 && alreadyOpen.Process.ProcessStartTimeUtc != default)
+        {
+            // An exact executable with one visible owned window can be reused immediately.
+            // Do not start a second process and wait two seconds for a title change that a
+            // single-instance app may never make. Keep live identity checks on both sides
+            // of activation, and stop instead of relaunching if that identity changes.
+            if (!TryActivateBoundWindow(alreadyOpen, runtime, DateTimeOffset.MinValue,
+                    new HashSet<IntPtr>(), requireCalculatorIdentity: false, cancellationToken))
+                throw TargetChanged("已打开的软件窗口发生变化或无法确认激活，本次操作已停止。");
+            cancellationToken.ThrowIfCancellationRequested();
+            launchInitiated?.Invoke();
+            return new(alreadyOpen.Process.ProcessId, alreadyOpen.Handle.ToInt64(), alreadyOpen.Title);
+        }
+        var before = existing.ToDictionary(item => item.Handle, item => item.Title);
         var started = runtime.Start(startInfo);
         if (started is not null && !appsFolderTarget)
         {
@@ -172,11 +194,19 @@ internal static class TrustedApplicationActivation
             throw TargetChanged("Windows 没有返回可验证的应用启动信息，本次操作已安全停止。");
         }
 
+        var notified = started is { ProcessId: > 0 };
+        if (notified)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            launchInitiated?.Invoke();
+        }
+
         var attemptTimestamp = runtime.GetTimestamp();
         while (runtime.GetElapsedTime(attemptTimestamp) < windowDiscoveryTimeout)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var windows = EnumerateMatching(runtime, processName, appsFolderTarget);
+            var windows = EnumerateMatching(runtime, processName, appsFolderTarget)
+                .Where(item => settingsTarget || MatchesRegisteredTarget(application, item.Process)).ToArray();
             var candidate = windows.FirstOrDefault(item => !before.ContainsKey(item.Handle))
                             ?? (!appsFolderTarget
                                 ? windows.FirstOrDefault(item =>
@@ -202,6 +232,11 @@ internal static class TrustedApplicationActivation
                     requireCalculatorIdentity: false,
                     cancellationToken))
             {
+                if (!notified)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    launchInitiated?.Invoke();
+                }
                 return new VisibleDesktopLaunchResult(
                     candidate.Process.ProcessId,
                     candidate.Handle.ToInt64(),
@@ -225,6 +260,64 @@ internal static class TrustedApplicationActivation
                 processName,
                 StringComparison.OrdinalIgnoreCase))
             .ToArray();
+
+    internal static bool MatchesRegisteredTarget(KnownDesktopApplication application, ApplicationProcessSnapshot process)
+    {
+        const string prefix = "shell:AppsFolder\\";
+        if (application.LaunchTarget.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return !string.IsNullOrWhiteSpace(process.ApplicationUserModelId)
+                && string.Equals(application.LaunchTarget[prefix.Length..], process.ApplicationUserModelId, StringComparison.OrdinalIgnoreCase);
+        var exactExecutable = Path.IsPathFullyQualified(application.LaunchTarget)
+            && !string.IsNullOrWhiteSpace(process.ExecutablePath)
+            && string.Equals(Path.GetFullPath(application.LaunchTarget), Path.GetFullPath(process.ExecutablePath), StringComparison.OrdinalIgnoreCase);
+        if (exactExecutable) return true;
+
+        // Windows 11's system notepad.exe is a launcher for the packaged Notepad.
+        // Keep the authorized system target unchanged and verify the OS-reported
+        // package identity together with its exact executable inside that package.
+        return string.Equals(application.Id, "notepad", StringComparison.Ordinal)
+            && IsTrustedSystemLauncher(application.LaunchTarget, "notepad.exe")
+            && IsTrustedNotepadProcess(process);
+    }
+
+    private static bool IsTrustedNotepadProcess(ApplicationProcessSnapshot process)
+    {
+        if (!process.IsRunning || process.ProcessId <= 0 || process.ProcessStartTimeUtc == default
+            || !string.Equals(process.ProcessName, "Notepad", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(process.PackageFamilyName, "Microsoft.WindowsNotepad_8wekyb3d8bbwe", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(process.ApplicationUserModelId, "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(process.PackageFullName)
+            || string.IsNullOrWhiteSpace(process.ExecutablePath)
+            || !Path.IsPathFullyQualified(process.ExecutablePath))
+        {
+            return false;
+        }
+
+        var package = process.PackageFullName.Split('_');
+        if (package.Length != 5
+            || !string.Equals(package[0], "Microsoft.WindowsNotepad", StringComparison.OrdinalIgnoreCase)
+            || !Version.TryParse(package[1], out var version) || version.Build < 0 || version.Revision < 0
+            || package[2] is not ("x64" or "x86" or "arm64")
+            || package[3].Length != 0
+            || !string.Equals(package[4], "8wekyb3d8bbwe", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (string.IsNullOrWhiteSpace(programFiles)) return false;
+        try
+        {
+            var expectedPath = Path.Combine(programFiles, "WindowsApps",
+                process.PackageFullName, "Notepad", "Notepad.exe");
+            return string.Equals(Path.GetFullPath(process.ExecutablePath), expectedPath,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
 
     private static bool TryActivateBoundWindow(
         ApplicationWindowSnapshot candidate,
@@ -340,7 +433,10 @@ internal static class TrustedApplicationActivation
                    StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsTrustedCalculatorLauncher(string launchTarget)
+    private static bool IsTrustedCalculatorLauncher(string launchTarget) =>
+        IsTrustedSystemLauncher(launchTarget, "calc.exe");
+
+    private static bool IsTrustedSystemLauncher(string launchTarget, string executableName)
     {
         if (!Path.IsPathFullyQualified(launchTarget))
         {
@@ -364,7 +460,7 @@ internal static class TrustedApplicationActivation
                 Environment.GetFolderPath(Environment.SpecialFolder.SystemX86)
             }
             .Where(item => !string.IsNullOrWhiteSpace(item))
-            .Select(item => Path.Combine(item, "calc.exe"))
+            .Select(item => Path.Combine(item, executableName))
             .Any(item => string.Equals(item, fullPath, StringComparison.OrdinalIgnoreCase));
     }
 

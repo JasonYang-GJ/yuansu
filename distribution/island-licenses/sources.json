@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "scope": "Exact upstream license texts absent from published Cargo packages",
+  "packages": [
+    {
+      "name": "alloc-stdlib",
+      "version": "0.2.4",
+      "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "commit": "ae42d22078b98549e987d2f03d12df7b984fde47",
+      "files": [
+        {
+          "path": "alloc-stdlib-0.2.4/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "sha256": "C0C56F26D9C051CAC4D200C34C84E7AE9AAA853E01A982A1DF08B09931E518AE"
+        }
+      ]
+    },
+    {
+      "name": "defmt-parser",
+      "version": "1.0.0",
+      "repository": "https://github.com/knurling-rs/defmt",
+      "commit": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "files": [
+        {
+          "path": "defmt-parser-1.0.0/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "sha256": "2710A622A896BBA67356913D4D0492CAB5465F61B2ECCE6D880AEB483834FB50"
+        },
+        {
+          "path": "defmt-parser-1.0.0/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "sha256": "8173D5C29B4F956D532781D2B86E4E30F83E6B7878DCE18C919451D6BA707C90"
+        }
+      ]
+    },
+    {
+      "name": "selectors",
+      "version": "0.36.1",
+      "repository": "https://github.com/servo/stylo",
+      "commit": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+      "files": [
+        {
+          "path": "selectors-0.36.1/LICENSE-MPL-2.0.txt",
+          "sourceUrl": "https://www.mozilla.org/media/MPL/2.0/index.txt",
+          "sha256": "3F3D9E0024B1921B067D6F7F88DEB4A60CBE7A78E76C64E3F1D7FC3B779B9D04",
+          "kind": "LICENSE"
+        },
+        {
+          "path": "selectors-0.36.1/NOTICE-SOURCE.txt",
+          "sourceUrl": "https://raw.githubusercontent.com/servo/stylo/635e1a19d02960588a00e189bd4bd5bdb150ec3d/selectors/lib.rs",
+          "sha256": "766674381E88A468D55E07DE3596987391CF0E8BEEBE51BAF4FDDF11078785B3",
+          "kind": "EXACT_SOURCE_LICENSE_DECLARATION"
+        }
+      ]
+    },
+    {
+      "name": "unic-char-property",
+      "version": "0.9.0",
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "path": "unic-char-property-0.9.0/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23F18E03DC49DF91622FE2A76176497404E46CED8A715D9D2B67A7446571CCA3"
+        },
+        {
+          "path": "unic-char-property-0.9.0/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "A60EEA817514531668D7E00765731449FE14D059D3249E0BC93B36DE45F759F2"
+        }
+      ]
+    },
+    {
+      "name": "unic-char-range",
+      "version": "0.9.0",
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "path": "unic-char-range-0.9.0/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23F18E03DC49DF91622FE2A76176497404E46CED8A715D9D2B67A7446571CCA3"
+        },
+        {
+          "path": "unic-char-range-0.9.0/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "A60EEA817514531668D7E00765731449FE14D059D3249E0BC93B36DE45F759F2"
+        }
+      ]
+    },
+    {
+      "name": "unic-common",
+      "version": "0.9.0",
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "path": "unic-common-0.9.0/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23F18E03DC49DF91622FE2A76176497404E46CED8A715D9D2B67A7446571CCA3"
+        },
+        {
+          "path": "unic-common-0.9.0/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "A60EEA817514531668D7E00765731449FE14D059D3249E0BC93B36DE45F759F2"
+        }
+      ]
+    },
+    {
+      "name": "unic-ucd-ident",
+      "version": "0.9.0",
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+      "files": [
+        {
+          "path": "unic-ucd-ident-0.9.0/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
+          "sha256": "23F18E03DC49DF91622FE2A76176497404E46CED8A715D9D2B67A7446571CCA3"
+        },
+        {
+          "path": "unic-ucd-ident-0.9.0/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
+          "sha256": "A60EEA817514531668D7E00765731449FE14D059D3249E0BC93B36DE45F759F2"
+        }
+      ]
+    },
+    {
+      "name": "unic-ucd-version",
+      "version": "0.9.0",
+      "repository": "https://github.com/open-i18n/rust-unic",
+      "commit": "5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "path": "unic-ucd-version-0.9.0/LICENSE-MIT",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23F18E03DC49DF91622FE2A76176497404E46CED8A715D9D2B67A7446571CCA3"
+        },
+        {
+          "path": "unic-ucd-version-0.9.0/LICENSE-APACHE",
+          "sourceUrl": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "A60EEA817514531668D7E00765731449FE14D059D3249E0BC93B36DE45F759F2"
+        }
+      ]
+    },
+    {
+      "name": "webview2-com",
+      "version": "0.38.2",
+      "repository": "https://github.com/wravery/webview2-rs",
+      "commit": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "files": [
+        {
+          "path": "webview2-com-0.38.2/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE",
+          "sha256": "0DCF41516E608BBCB6CDC5229FEB7B86FE4A643B85E7DF251133C93408FDAC73"
+        }
+      ]
+    },
+    {
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "repository": "https://github.com/wravery/webview2-rs",
+      "commit": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "files": [
+        {
+          "path": "webview2-com-macros-0.8.1/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "sha256": "0DCF41516E608BBCB6CDC5229FEB7B86FE4A643B85E7DF251133C93408FDAC73"
+        }
+      ]
+    },
+    {
+      "name": "webview2-com-sys",
+      "version": "0.38.2",
+      "repository": "https://github.com/wravery/webview2-rs",
+      "commit": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "files": [
+        {
+          "path": "webview2-com-sys-0.38.2/LICENSE",
+          "sourceUrl": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE",
+          "sha256": "0DCF41516E608BBCB6CDC5229FEB7B86FE4A643B85E7DF251133C93408FDAC73"
+        }
+      ]
+    }
+  ]
+}

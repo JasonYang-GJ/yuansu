@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using ScreenGuide.AI.Core;
 using ScreenGuide.Core.Tasking;
 using ScreenGuide.DesktopProtocol;
+using ScreenGuide.Skills.Abstractions;
 using ScreenGuide.Skills.Windows;
 
 namespace ScreenGuide.DesktopHost.Runtime;
@@ -19,11 +20,38 @@ public sealed class AssistantCommandService(
     ConversationService conversations,
     DesktopActionEntryService desktopActions,
     WindowUnderstandingService windowUnderstanding,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IDesktopFileCatalog? desktopFiles = null)
 {
+    private readonly IDesktopFileCatalog _desktopFiles = desktopFiles ?? new DesktopFileCatalog();
     private readonly ConcurrentDictionary<Guid, PendingPlan> _plans = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _windowObservations =
         new(StringComparer.Ordinal);
+
+    internal void ValidateFilePlanForContinuation(Guid? planId)
+    {
+        if (planId is null || !_plans.TryGetValue(planId.Value, out var pending)
+            || pending.Plan.Kind != UniversalIntentKind.OpenFile
+            || pending.Plan.ExpiresAtUtc <= timeProvider.GetUtcNow())
+            throw new InvalidOperationException("文件确认已失效，请重新选择并确认。");
+        if (pending.DesktopFile is not null) _desktopFiles.RequireUnchanged(pending.DesktopFile);
+    }
+
+    internal void ValidateApplicationPlanForContinuation(Guid? previousPlanId, Guid currentPlanId)
+    {
+        var now = timeProvider.GetUtcNow();
+        if (previousPlanId is null || !_plans.TryGetValue(previousPlanId.Value, out var previous)
+            || !_plans.TryGetValue(currentPlanId, out var current)
+            || previous.Plan.Kind != UniversalIntentKind.OpenApplication
+            || current.Plan.Kind != UniversalIntentKind.OpenApplication
+            || previous.Plan.ExpiresAtUtc <= now || current.Plan.ExpiresAtUtc <= now
+            || string.IsNullOrWhiteSpace(previous.ApplicationTargetBinding)
+            || !string.Equals(previous.ApplicationId, current.ApplicationId, StringComparison.Ordinal)
+            || !string.Equals(previous.ApplicationTargetBinding, current.ApplicationTargetBinding, StringComparison.Ordinal))
+            throw new InstalledApplicationResolutionException(
+                InstalledApplicationErrorCodes.TargetChanged,
+                "刚才确认的应用目标已经变化或失效，本次没有打开程序；请重新确认。");
+    }
 
     public async Task<AssistantIntentPlanDto> PlanAsync(
         PlanAssistantCommandRequestDto request,
@@ -33,6 +61,7 @@ public sealed class AssistantCommandService(
                 sessionTurnId: null,
                 frozenRoute: null,
                 persistedIntent: null,
+                confirmedPlanId: null,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -41,7 +70,8 @@ public sealed class AssistantCommandService(
         Guid sessionTurnId,
         FrozenChatModelRoute? frozenRoute,
         UniversalIntentKind? persistedIntent,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Guid? confirmedPlanId = null)
     {
         if (sessionTurnId == Guid.Empty)
         {
@@ -53,6 +83,7 @@ public sealed class AssistantCommandService(
                 sessionTurnId,
                 frozenRoute,
                 persistedIntent,
+                confirmedPlanId,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -62,11 +93,50 @@ public sealed class AssistantCommandService(
         Guid? sessionTurnId,
         FrozenChatModelRoute? frozenRoute,
         UniversalIntentKind? persistedIntent,
+        Guid? confirmedPlanId,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var selectedFile = NormalizeSelectedFile(request.SelectedFilePath);
+        cancellationToken.ThrowIfCancellationRequested();
         var inputModality = NormalizeInputModality(request.InputModality);
+        DesktopFileRequest.TryParse(request.Text, out var desktopRequest);
+        if (inputModality == "ProgrammingTask"
+            || persistedIntent is not (null or UniversalIntentKind.OpenFile or UniversalIntentKind.FindDesktopFile))
+            desktopRequest = null;
+        var selectedFile = desktopRequest?.Mode == DesktopFileRequestMode.Find
+            ? null : NormalizeSelectedFile(request.SelectedFilePath);
+        DesktopFileResolution? desktopResolution = null;
+        if (desktopRequest is { Mode: DesktopFileRequestMode.Open }
+            && !request.Text.Any(char.IsControl) && DesktopFileRequest.IsValidName(desktopRequest.Name))
+        {
+            if (confirmedPlanId is not null)
+            {
+                // Re-planning may refresh context, but a confirmation must never replace
+                // the file's original fingerprint with metadata sampled after confirmation.
+                if (!_plans.TryGetValue(confirmedPlanId.Value, out var previous)
+                    || previous.SessionTurnId != sessionTurnId
+                    || previous.Plan.Kind != UniversalIntentKind.OpenFile
+                    || previous.Plan.ExpiresAtUtc <= timeProvider.GetUtcNow()
+                    || previous.DesktopFile is not { } boundFile
+                    || !string.Equals(boundFile.FullPath, selectedFile, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("刚才确认的桌面文件已失效或发生变化，请重新选择并确认，尚未打开。");
+                _desktopFiles.RequireUnchanged(boundFile);
+                desktopResolution = new(boundFile, "已保留刚才确认的桌面文件。");
+            }
+            else if (selectedFile is not null)
+            {
+                desktopResolution = _desktopFiles.BindSelected(desktopRequest.Name, selectedFile);
+            }
+            else
+            {
+                var found = _desktopFiles.Find(desktopRequest.Name);
+                desktopResolution = found.Complete && found.TotalMatches == 1 && found.Candidates.Count == 1
+                    ? new(found.Candidates[0], "已找到唯一匹配的桌面文件。")
+                    : new(null, DescribeDesktopFiles(found, forOpening: true));
+            }
+            selectedFile = desktopResolution.File?.FullPath;
+        }
+        cancellationToken.ThrowIfCancellationRequested();
         var project = await FindAuthorizedProjectAsync(request.SelectedProjectId, cancellationToken)
             .ConfigureAwait(false);
         var foreground = foregroundWindows.GetLastExternalWindow();
@@ -83,8 +153,48 @@ public sealed class AssistantCommandService(
             request.ForegroundObservationConsent,
             inputModality == "ProgrammingTask"
                 ? UniversalIntentKind.CodingTask
-                : persistedIntent);
+                : persistedIntent,
+            PreferInstalledApplication: persistedIntent == UniversalIntentKind.OpenApplication);
         var plan = planner.Plan(request.Text, context);
+        KnownDesktopApplication? plannedApplication = null;
+        if (plan.Kind is UniversalIntentKind.OpenWebsite or UniversalIntentKind.ApplicationSearch or UniversalIntentKind.Unsupported
+            && context.ExplicitUserIntent is null
+            && !request.Text.Any(char.IsControl)
+            && DeterministicIntentPlanner.TryGetApplicationPreference(request.Text, out var applicationName))
+        {
+            try
+            {
+                plannedApplication = applications.ResolveApplicationPreference(applicationName);
+                plan = planner.Plan(request.Text, context with { PreferInstalledApplication = true });
+            }
+            catch (InstalledApplicationResolutionException exception)
+                when (exception.Code == InstalledApplicationErrorCodes.NotFound)
+            {
+                // A literal registered application name takes precedence over a
+                // website or an implicit search split. Only absence may fall back;
+                // ambiguity and rejected launch targets must never authorize a search.
+            }
+        }
+        if (plan.Kind == UniversalIntentKind.SearchForeground && plan.Readiness == IntentPlanReadiness.NeedsContext
+            && foreground is not null && context.ForegroundApplication is not null)
+        {
+            plan = planner.Plan(request.Text, context with
+            {
+                ForegroundApplication = context.ForegroundApplication with { ApplicationNames = applications.GetNamesForWindow(foreground) }
+            });
+        }
+        if (desktopResolution is not null && plan.Kind == UniversalIntentKind.OpenFile)
+        {
+            if (desktopResolution.File is not null
+                && !string.Equals(plan.Target, desktopResolution.File.FullPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("桌面文件计划与选定文件不一致，本次没有打开文件。");
+            plan = plan with
+            {
+                UserSummary = desktopResolution.File is null ? desktopResolution.Message : plan.UserSummary,
+                ConfirmationText = desktopResolution.File is null ? null
+                    : $"确认用默认应用打开桌面文件“{Path.GetFileName(selectedFile)}”？\n完整路径：{selectedFile}"
+            };
+        }
         if (plan.Kind == UniversalIntentKind.Conversation
             && context.ExplicitUserIntent is null
             && sessionTurnId is not null
@@ -108,16 +218,34 @@ public sealed class AssistantCommandService(
             }
         }
 
-        KnownDesktopApplication? plannedApplication = null;
+        ApplicationSearchWorkflow? applicationSearch = null;
         if (plan.Readiness == IntentPlanReadiness.Ready
-            && plan.Kind == UniversalIntentKind.OpenApplication)
+            && plan.Kind is UniversalIntentKind.OpenApplication or UniversalIntentKind.ApplicationSearch)
         {
-            plannedApplication = applications.ResolveByDisplayName(plan.Target ?? string.Empty);
+            plannedApplication ??= applications.ResolveByDisplayName(
+                plan.Kind == UniversalIntentKind.ApplicationSearch
+                    ? plan.ApplicationSearch?.ApplicationName ?? string.Empty
+                    : plan.Target ?? string.Empty);
             if (!InstalledApplicationCatalog.IsAllowedLaunchTarget(plannedApplication))
             {
                 throw new InstalledApplicationResolutionException(
                     InstalledApplicationErrorCodes.TargetNotAllowed,
                     "这个应用目标不符合安全启动要求，本次没有打开任何程序。");
+            }
+
+            if (plan.Kind == UniversalIntentKind.ApplicationSearch)
+            {
+                var search = plan.ApplicationSearch
+                    ?? throw new InvalidDataException("应用搜索计划缺少明确的搜索内容。");
+                if (!Enum.TryParse<ApplicationSearchFollowUp>(search.FollowUp, false, out var followUp)
+                    || !Enum.IsDefined(followUp))
+                    throw new InvalidDataException("应用搜索计划包含尚未开放的后续操作。");
+                applicationSearch = new ApplicationSearchWorkflow(
+                    plannedApplication.Id,
+                    DesktopSearchQuery.NormalizeAndValidate(search.Query),
+                    followUp,
+                    search.LatestMusicArtist);
+                applicationSearch.Validate();
             }
         }
 
@@ -132,10 +260,16 @@ public sealed class AssistantCommandService(
                 plannedApplication?.Id,
                 plannedApplication is null
                     ? null
-                    : InstalledApplicationCatalog.CreateTargetBinding(plannedApplication));
+                    : InstalledApplicationCatalog.CreateTargetBinding(plannedApplication),
+                desktopResolution?.File,
+                applicationSearch,
+                sessionTurnId);
         }
 
-        return Map(plan, foreground, plannedApplication?.Id);
+        return Map(plan,
+            plan.Kind is UniversalIntentKind.ApplicationSearch or UniversalIntentKind.FindDesktopFile ? null : foreground,
+            plannedApplication?.Id,
+            applicationSearch?.ToCanonicalTarget(InstalledApplicationCatalog.CreateTargetBinding(plannedApplication!)));
     }
 
     public async Task<AssistantCommandResultDto> ExecuteAsync(
@@ -143,6 +277,7 @@ public sealed class AssistantCommandService(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!_plans.TryRemove(request.PlanId, out var pending))
         {
             throw new InvalidOperationException("这条操作计划已经失效或处理过，请重新说一次。 ");
@@ -183,6 +318,9 @@ public sealed class AssistantCommandService(
                 foregroundWindows.ResolveWindow(expected.WindowHandle));
         }
 
+        if (pending.DesktopFile is not null)
+            _desktopFiles.RequireUnchanged(pending.DesktopFile);
+
         return plan.Kind switch
         {
             UniversalIntentKind.Conversation => await ExecuteConversationAsync(plan, effectiveRequest, cancellationToken)
@@ -198,8 +336,11 @@ public sealed class AssistantCommandService(
                 .ConfigureAwait(false),
             UniversalIntentKind.OpenWebsite => await ExecuteWebsiteAsync(
                 plan, effectiveRequest, cancellationToken).ConfigureAwait(false),
+            UniversalIntentKind.ApplicationSearch => await ExecuteApplicationSearchAsync(
+                plan, pending, effectiveRequest, cancellationToken).ConfigureAwait(false),
             UniversalIntentKind.OpenFile => await ExecuteDesktopAsync(
                 plan, effectiveRequest, "OpenFile", plan.Target!, null, cancellationToken).ConfigureAwait(false),
+            UniversalIntentKind.FindDesktopFile => ExecuteFindDesktopFiles(plan, cancellationToken),
             UniversalIntentKind.SearchForeground => await ExecuteDesktopAsync(
                 plan, effectiveRequest, "SearchForeground", plan.Target!, pending.Foreground, cancellationToken)
                 .ConfigureAwait(false),
@@ -208,6 +349,35 @@ public sealed class AssistantCommandService(
                 .ConfigureAwait(false),
             _ => throw new NotSupportedException("当前版本还不能执行这类请求。")
         };
+    }
+
+    private AssistantCommandResultDto ExecuteFindDesktopFiles(IntentPlan plan, CancellationToken cancellationToken)
+    {
+        if (!DesktopFileRequest.TryParse(plan.OriginalText, out var request)
+            || request!.Mode != DesktopFileRequestMode.Find
+            || !DesktopFileRequest.IsValidName(request.Name)
+            || !string.Equals(request.Name, plan.Target, StringComparison.Ordinal))
+            throw new InvalidOperationException("这次查找的桌面文件名已失效，请重新说明。");
+        cancellationToken.ThrowIfCancellationRequested();
+        var found = _desktopFiles.Find(request.Name);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new(plan.Kind.ToString(), found.Complete ? "Completed" : "Failed",
+            DescribeDesktopFiles(found, forOpening: false), "NotApplicable");
+    }
+
+    private static string DescribeDesktopFiles(DesktopFileSearchResult found, bool forOpening)
+    {
+        if (!found.Complete)
+            return $"{found.Message}\n尚未完成完整查找，没有打开任何文件。";
+        if (found.TotalMatches == 0)
+            return $"{found.Message}\n没有打开任何文件。";
+        var visible = found.Candidates.Take(8).ToArray();
+        var names = string.Join("\n", visible.Select((file, index) => $"{index + 1}. {Path.GetFileName(file.FullPath)}"));
+        var remainder = found.TotalMatches > visible.Length ? $"\n这里只列出前 {visible.Length} 项。" : string.Empty;
+        var next = forOpening
+            ? "请点击“选择文件”指定这次要打开的桌面文件，确认后才会打开。"
+            : "如需打开，请再明确说出要打开的文件名。";
+        return $"找到 {found.TotalMatches} 个匹配的桌面文档：\n{names}{remainder}\n没有打开任何文件。{next}";
     }
 
     public bool CancelWindowObservation(string operationId)
@@ -307,6 +477,42 @@ public sealed class AssistantCommandService(
             null,
             cancellationToken,
             applicationTargetBinding: applicationTargetBinding);
+    }
+
+    private async Task<AssistantCommandResultDto> ExecuteApplicationSearchAsync(
+        IntentPlan plan,
+        PendingPlan pending,
+        ExecuteAssistantCommandRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        var workflow = pending.ApplicationSearch
+            ?? throw new InvalidDataException("应用搜索计划缺少本次操作范围。");
+        var binding = pending.ApplicationTargetBinding
+            ?? throw new InvalidDataException("应用搜索计划缺少可信应用身份。");
+        cancellationToken.ThrowIfCancellationRequested();
+        var outcome = await desktopActions.ExecuteApplicationSearchWorkflowAsync(
+            new ExecuteDesktopActionRequestDto(
+                "SearchApplication", workflow.ApplicationId, request.Confirmed,
+                request.IdempotencyKey, AuthorizationSource: request.AuthorizationSource),
+            workflow, binding, cancellationToken).ConfigureAwait(false);
+        var result = outcome.Result;
+        var verified = outcome.Evidence;
+        var facts = new List<string>();
+        if (verified?.ApplicationVerified == true) facts.Add("已核对并打开本次指定的应用窗口");
+        if (verified?.QuerySubmitted == true) facts.Add("搜索内容已准确写入明确识别的搜索框并提交一次");
+        if (verified?.ResultsVerified == true)
+            facts.Add(verified.NoResults ? "界面已明确显示没有匹配结果" : "已在目标应用中检查到本次搜索结果");
+        if (verified?.FollowUpVerified == true)
+            facts.Add(workflow.FollowUp == ApplicationSearchFollowUp.PlayFirst
+                ? "已核对第一条结果的播放状态" : "已核对第一条结果打开后的界面");
+        var status = result.Succeeded ? "WorkflowVerified" : "NotVerified";
+        return new AssistantCommandResultDto(
+            plan.Kind.ToString(), result.Succeeded ? "Completed" : "Failed", result.Message,
+            status, CommandId: result.CommandId, WasDuplicate: result.WasDuplicate,
+            Evidence: new AssistantActionEvidenceDto(
+                Guid.NewGuid(), status, result.Message, facts,
+                result.Succeeded ? Array.Empty<string>() : ["本次完整操作尚未验证成功"],
+                timeProvider.GetUtcNow()));
     }
 
     private Task<AssistantCommandResultDto> ExecuteWebsiteAsync(
@@ -507,16 +713,19 @@ public sealed class AssistantCommandService(
     private static bool IsDirectVoiceAction(UniversalIntentKind kind) =>
         kind is UniversalIntentKind.OpenApplication
             or UniversalIntentKind.OpenWebsite
-            or UniversalIntentKind.SearchForeground;
+            or UniversalIntentKind.SearchForeground
+            or UniversalIntentKind.ApplicationSearch;
 
     private AssistantIntentPlanDto Map(
         IntentPlan plan,
         ForegroundWindowSnapshot? foreground,
-        string? plannedApplicationId = null)
+        string? plannedApplicationId = null,
+        string? applicationSearchTarget = null)
     {
         var canonicalTarget = plan.Kind switch
         {
             UniversalIntentKind.OpenApplication => plannedApplicationId,
+            UniversalIntentKind.ApplicationSearch => applicationSearchTarget,
             UniversalIntentKind.OpenWebsite when Uri.TryCreate(
                 plan.Target,
                 UriKind.Absolute,
@@ -561,5 +770,8 @@ public sealed class AssistantCommandService(
         bool ObservationConsent,
         string InputModality,
         string? ApplicationId,
-        string? ApplicationTargetBinding);
+        string? ApplicationTargetBinding,
+        DesktopFileBinding? DesktopFile = null,
+        ApplicationSearchWorkflow? ApplicationSearch = null,
+        Guid? SessionTurnId = null);
 }

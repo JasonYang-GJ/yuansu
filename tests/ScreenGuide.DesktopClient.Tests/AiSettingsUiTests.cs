@@ -14,7 +14,7 @@ public sealed class AiSettingsUiTests
             "ScreenGuide.DesktopClient",
             "MainWindow.xaml"));
 
-        Assert.Contains("长期记忆（阶段 3）", xaml, StringComparison.Ordinal);
+        Assert.Contains("我的记忆", xaml, StringComparison.Ordinal);
         Assert.Contains("仅保存在本机；当前不会自动发送给模型。", xaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.AutomationId=\"MemoryList\"", xaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.AutomationId=\"MemoryTitle\"", xaml, StringComparison.Ordinal);

@@ -147,14 +147,17 @@ public sealed class IntentPlannerTests
     }
 
     [Fact]
-    public void CompoundOpenAndSearchIsNotPlannedAsOneAction()
+    public void CompoundOpenAndSearchBindsOneExplicitWorkflow()
     {
         var context = new IntentPlanningContext(
             ForegroundApplication: new ForegroundApplicationContext(42, "浏览器", "chrome"));
 
         var result = _planner.Plan("打开浏览器并搜索周杰伦", context);
 
-        Assert.Equal(UniversalIntentKind.Unsupported, result.Kind);
+        Assert.Equal(UniversalIntentKind.ApplicationSearch, result.Kind);
+        Assert.Equal("浏览器", result.ApplicationSearch!.ApplicationName);
+        Assert.Equal("周杰伦", result.ApplicationSearch.Query);
+        Assert.Equal("None", result.ApplicationSearch.FollowUp);
     }
 
     [Theory]

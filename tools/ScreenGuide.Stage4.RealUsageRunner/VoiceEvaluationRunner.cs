@@ -250,11 +250,11 @@ internal static class VoiceEvaluationRunner
             }
         }
 
-        private void OnPartial(object? sender, string text)
+        private void OnPartial(object? sender, VoicePartialText partial)
         {
             lock (_sync)
             {
-                _active?.OnPartial(text, Stopwatch.GetTimestamp());
+                _active?.OnPartial(partial.Text, Stopwatch.GetTimestamp());
             }
         }
 

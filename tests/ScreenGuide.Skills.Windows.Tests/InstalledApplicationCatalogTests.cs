@@ -3,12 +3,101 @@ namespace ScreenGuide.Skills.Windows.Tests;
 public sealed class InstalledApplicationCatalogTests
 {
     [Theory]
+    [InlineData("网易云音乐", "桌面上的网易云")]
+    [InlineData("抖音", "桌面的抖音")]
+    [InlineData("Blender 5.2", "我桌面上的 Blender")]
+    [InlineData("微信", "我的桌面上的微信客户端")]
+    [InlineData("新星创作工具", "我的桌面的新星创作工具")]
+    [InlineData("新星创作工具", "我桌面的新星创作工具")]
+    [InlineData("新星创作工具", "电脑桌面上的新星创作工具")]
+    [InlineData("新星创作工具", "我的电脑桌面上的新星创作工具")]
+    [InlineData("新星创作工具", "我电脑桌面上的新星创作工具")]
+    [InlineData("新星创作工具", "桌面上新星创作工具")]
+    public void DesktopLocationQualifierResolvesTheRegisteredApplication(
+        string registeredName, string spokenName)
+    {
+        var root = CreateRoot("desktop-qualifier");
+        try
+        {
+            var registration = Registration(registeredName, root, "arbitrary-app.exe");
+            var catalog = new InstalledApplicationCatalog(() => [registration]);
+
+            Assert.Equal(registration.Target, catalog.ResolveByDisplayName(spokenName).LaunchTarget);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void DesktopLocationQualifierDoesNotOverrideAnExactRegisteredName()
+    {
+        var root = CreateRoot("desktop-literal");
+        try
+        {
+            var literal = Registration("桌面上的网易云", root, "literal.exe");
+            var music = Registration("网易云音乐", root, "cloudmusic.exe");
+            var catalog = new InstalledApplicationCatalog(() => [literal, music]);
+
+            Assert.Equal(literal.Target, catalog.ResolveByDisplayName("桌面上的网易云").LaunchTarget);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void DesktopLocationQualifierKeepsDifferentMatchingTargetsAmbiguous()
+    {
+        var root = CreateRoot("desktop-ambiguous");
+        try
+        {
+            var catalog = new InstalledApplicationCatalog(() =>
+            [
+                Registration("新星创作工具", root, "first.exe"),
+                Registration("新星创作工具", root, "second.exe")
+            ]);
+
+            var error = Assert.Throws<InstalledApplicationResolutionException>(() =>
+                catalog.ResolveByDisplayName("我的桌面上的新星创作工具"));
+
+            Assert.Equal(InstalledApplicationErrorCodes.Ambiguous, error.Code);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("抖音", "我的抖音软件")]
+    [InlineData("Blender 5.2", "我的 Blender")]
+    [InlineData("微信", "我电脑里的微信客户端")]
+    [InlineData("新星创作工具", "我的新星创作工具")]
+    public void NewlyRegisteredApplicationsUseGenericSpokenNamesWithoutAnAliasEntry(string registeredName, string spokenName)
+    {
+        var root = CreateRoot("generic-fresh");
+        try
+        {
+            var registration = Registration(registeredName, root, "arbitrary-app.exe");
+            var installed = false;
+            var discoveries = 0;
+            var catalog = new InstalledApplicationCatalog(() => {
+                discoveries++;
+                return installed ? [registration] : [];
+            });
+            _ = catalog.GetApplications();
+            installed = true;
+            Assert.Equal(registration.Target, catalog.ResolveByDisplayName(spokenName).LaunchTarget);
+            Assert.Equal(2, discoveries);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
     [InlineData("谷歌浏览器", "Google Chrome")]
     [InlineData("夸克", "夸克浏览器")]
     [InlineData("剪映", "剪映专业版")]
     [InlineData("剪映专业版", "剪映专业版")]
     [InlineData("网易云", "网易云音乐")]
     [InlineData("网易云音乐", "网易云音乐")]
+    [InlineData("我的网易云", "网易云音乐")]
+    [InlineData("我的网易云音乐", "网易云音乐")]
+    [InlineData("我电脑上的网易云", "网易云音乐")]
+    [InlineData("我电脑里的网易云音乐", "网易云音乐")]
     public void ResolveByDisplayName_UsesFixedSafeAliases(
         string requestedName,
         string expectedDisplayName)
@@ -175,6 +264,119 @@ public sealed class InstalledApplicationCatalogTests
         }
     }
 
+    [Fact]
+    public void ApplicationPreferenceMissUsesTheFreshDiscoveryWithoutImmediatelyRepeatingIt()
+    {
+        var root = CreateRoot("preference-fresh");
+        try
+        {
+            var music = Registration("网易云音乐", root, "cloudmusic.exe");
+            var discoveries = 0;
+            var catalog = new InstalledApplicationCatalog(() =>
+            {
+                discoveries++;
+                return [music];
+            });
+
+            var error = Assert.Throws<InstalledApplicationResolutionException>(() =>
+                catalog.ResolveApplicationPreference("网易云，搜索周杰伦最新的歌"));
+
+            Assert.Equal(InstalledApplicationErrorCodes.NotFound, error.Code);
+            Assert.Equal(music.Target, catalog.ResolveByDisplayName("网易云").LaunchTarget);
+            Assert.Equal(1, discoveries);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void ApplicationPreferenceDoesNotKeepAMissingWholeNameAcrossRequests()
+    {
+        var root = CreateRoot("preference-new-install");
+        try
+        {
+            var chat = Registration("微信", root, "chat.exe");
+            var literal = Registration("微信搜索助手", root, "assistant.exe");
+            var installed = false;
+            var discoveries = 0;
+            var catalog = new InstalledApplicationCatalog(() =>
+            {
+                discoveries++;
+                return installed ? [chat, literal] : [chat];
+            });
+            _ = Assert.Throws<InstalledApplicationResolutionException>(() =>
+                catalog.ResolveApplicationPreference("微信搜索助手"));
+            installed = true;
+
+            var application = catalog.ResolveApplicationPreference("微信搜索助手");
+
+            Assert.Equal(literal.Target, application.LaunchTarget);
+            Assert.Equal(2, discoveries);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void ApplicationPreferenceMissInAnExistingSnapshotRefreshesExactlyOnce()
+    {
+        var discoveries = 0;
+        var catalog = new InstalledApplicationCatalog(() =>
+        {
+            discoveries++;
+            return [];
+        });
+        _ = catalog.GetApplications();
+
+        var error = Assert.Throws<InstalledApplicationResolutionException>(() =>
+            catalog.ResolveApplicationPreference("不存在的应用搜索助手"));
+
+        Assert.Equal(InstalledApplicationErrorCodes.NotFound, error.Code);
+        Assert.Equal(2, discoveries);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ApplicationPreferenceAmbiguityCannotRefreshIntoAnotherTarget(bool prepopulateCache)
+    {
+        var root = CreateRoot("preference-ambiguous");
+        try
+        {
+            var first = Registration("微信搜索助手", root, "first.exe");
+            var second = Registration("微信搜索助手", root, "second.exe");
+            var discoveries = 0;
+            var catalog = new InstalledApplicationCatalog(() =>
+                ++discoveries == 1 ? [first, second] : [first]);
+            if (prepopulateCache) _ = catalog.GetApplications();
+
+            var error = Assert.Throws<InstalledApplicationResolutionException>(() =>
+                catalog.ResolveApplicationPreference("微信搜索助手"));
+
+            Assert.Equal(InstalledApplicationErrorCodes.Ambiguous, error.Code);
+            Assert.Equal(1, discoveries);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("账户设置搜索助手")]
+    [InlineData("以管理员身份运行微信")]
+    [InlineData("C:\\tools\\unsafe.exe")]
+    public void ApplicationPreferenceRejectsUnsafeNamesBeforeAnyDiscovery(string requestedName)
+    {
+        var discoveries = 0;
+        var catalog = new InstalledApplicationCatalog(() =>
+        {
+            discoveries++;
+            return [];
+        });
+
+        var error = Assert.Throws<InstalledApplicationResolutionException>(() =>
+            catalog.ResolveApplicationPreference(requestedName));
+
+        Assert.Equal(InstalledApplicationErrorCodes.TargetNotAllowed, error.Code);
+        Assert.Equal(0, discoveries);
+    }
+
     [Theory]
     [InlineData("设置", "ms-settings:")]
     [InlineData("显示设置", "ms-settings:display")]
@@ -215,6 +417,22 @@ public sealed class InstalledApplicationCatalogTests
         Assert.Equal("application_target_not_allowed", error.Code);
     }
 
+    [Fact]
+    public void PossessivePrefixDoesNotOverrideAnExactRegisteredName()
+    {
+        var root = CreateRoot("possessive");
+        try
+        {
+            var literal = Registration("我的网易云", root, "literal.exe");
+            var music = Registration("网易云音乐", root, "cloudmusic.exe");
+            var catalog = new InstalledApplicationCatalog(() => [literal, music]);
+            Assert.Equal(literal.Target, catalog.ResolveByDisplayName("我的网易云").LaunchTarget);
+            Assert.Throws<InstalledApplicationResolutionException>(() =>
+                catalog.ResolveByDisplayName("我的不存在的程序"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Theory]
     [InlineData(@"以管理员身份运行C:\Gate4A\admin.exe")]
     [InlineData(@"以管理员身份运行 C:\Gate4A\admin.exe")]
@@ -225,6 +443,10 @@ public sealed class InstalledApplicationCatalogTests
     [InlineData("\"C:\\Gate4A\\admin.exe\" --unsafe")]
     [InlineData("“admin.exe” --unsafe")]
     [InlineData("执行命令时使用运行")]
+    [InlineData(@"桌面上的C:\Gate4A\admin.exe")]
+    [InlineData("我的桌面上的admin.exe")]
+    [InlineData("桌面上的cmd /c calc")]
+    [InlineData("桌面上的以管理员身份运行")]
     public void ResolveByDisplayName_RejectsUnsafeRequestSyntaxBeforeFuzzyMatching(
         string requestedName)
     {

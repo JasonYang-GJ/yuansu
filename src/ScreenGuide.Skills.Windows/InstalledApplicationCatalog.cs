@@ -45,6 +45,7 @@ public sealed class InstalledApplicationResolutionException(
 
 public interface IInstalledApplicationCatalog
 {
+    IReadOnlyList<string> GetNamesForWindow(ForegroundWindowSnapshot window) => [];
     IReadOnlyList<KnownDesktopApplication> GetApplications();
 
     KnownDesktopApplication? FindById(string id);
@@ -57,6 +58,9 @@ public interface IInstalledApplicationCatalog
             InstalledApplicationErrorCodes.NotFound,
             "没有找到可安全打开的已安装应用，请检查名称后重试。");
 
+    KnownDesktopApplication ResolveApplicationPreference(string displayName) =>
+        ResolveByDisplayName(displayName);
+
     KnownDesktopApplication? FindBrowser(string browserName);
 }
 
@@ -66,6 +70,22 @@ public interface IInstalledApplicationCatalog
 /// </summary>
 public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
 {
+    public IReadOnlyList<string> GetNamesForWindow(ForegroundWindowSnapshot window)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(window.ProcessId);
+            if (new DateTimeOffset(process.StartTime.ToUniversalTime()) != window.ProcessStartTimeUtc) return [];
+            var path = process.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(path)) return [];
+            return GetApplications().Where(app => string.Equals(app.LaunchTarget, path, StringComparison.OrdinalIgnoreCase))
+                .SelectMany(app => new[] { app.DisplayName }.Concat(app.RegisteredNames ?? []))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        { return []; }
+    }
+
     private static readonly KnownDesktopApplication[] SafeSettings =
     [
         Settings("windows-settings", "Windows 设置", "ms-settings:",
@@ -149,11 +169,20 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
         _resolveShortcut = resolveShortcut ?? ResolveShortcut;
     }
 
-    public IReadOnlyList<KnownDesktopApplication> GetApplications()
+    public IReadOnlyList<KnownDesktopApplication> GetApplications() =>
+        GetApplications(out _);
+
+    private IReadOnlyList<KnownDesktopApplication> GetApplications(out bool discoveredNow)
     {
+        // A concurrent list request may finish discovery while this caller waits for the lock.
+        // Compare the published immutable snapshots so that completed work is still fresh for
+        // this request. A failed build never publishes a new snapshot or satisfies this check.
+        var observedSnapshot = Volatile.Read(ref _applications);
         lock (_sync)
         {
-            return _applications ??= BuildApplications(_discover(), _resolveShortcut);
+            var applications = _applications ??= BuildApplications(_discover(), _resolveShortcut);
+            discoveredNow = !ReferenceEquals(observedSnapshot, applications);
+            return applications;
         }
     }
 
@@ -189,7 +218,13 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
         }
     }
 
-    public KnownDesktopApplication ResolveByDisplayName(string displayName)
+    public KnownDesktopApplication ResolveByDisplayName(string displayName) =>
+        ResolveByDisplayName(displayName, refreshNewSnapshot: true);
+
+    public KnownDesktopApplication ResolveApplicationPreference(string displayName) =>
+        ResolveByDisplayName(displayName, refreshNewSnapshot: false);
+
+    private KnownDesktopApplication ResolveByDisplayName(string displayName, bool refreshNewSnapshot)
     {
         if (ContainsUnsafeApplicationRequestSyntax(displayName))
         {
@@ -212,15 +247,20 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
                 "这个 Windows 设置页面不在当前语音直达白名单中，请在设置中手动打开。");
         }
 
+        var discoveredNow = false;
         try
         {
-            return ResolveCore(GetApplications(), requested);
+            return ResolveCore(GetApplications(out discoveredNow), requested);
         }
         catch (InstalledApplicationResolutionException exception)
-            when (exception.Code == InstalledApplicationErrorCodes.NotFound)
+            when (exception.Code == InstalledApplicationErrorCodes.NotFound
+                  && (refreshNewSnapshot || !discoveredNow))
         {
             // A Start Menu shortcut or App Paths registration may have changed since startup.
             // Refresh exactly once for this command path; ambiguity and policy denial never retry.
+            // A whole-name planning preference already read in a newly built snapshot needs no
+            // second discovery. An older snapshot still refreshes so a newly installed literal
+            // application name cannot be mistaken for an app plus a search instruction.
             return ResolveCore(Refresh(), requested);
         }
     }
@@ -331,6 +371,40 @@ public sealed class InstalledApplicationCatalog : IInstalledApplicationCatalog
         if (exact.Length > 0)
         {
             return RequireUnique(exact);
+        }
+
+        // Only remove a leading conversational location/possessive after checking
+        // literal registered names. Never extract a name from arbitrary surrounding text.
+        // Longer desktop qualifiers precede "我的" so the remaining name is complete.
+        foreach (var qualifier in new[]
+                 {
+                     "我的电脑桌面上的", "我电脑桌面上的", "电脑桌面上的",
+                     "我的桌面上的", "我桌面上的", "桌面上的",
+                     "我的桌面的", "我桌面的", "桌面的", "桌面上",
+                     "我电脑上的", "我电脑里的", "我的电脑上的", "我的电脑里的",
+                     "电脑上的", "电脑里的", "我的"
+                 })
+        {
+            if (requested.StartsWith(qualifier, StringComparison.Ordinal) && requested.Length > qualifier.Length)
+            {
+                requested = requested[qualifier.Length..].Trim();
+                var unqualifiedExact = MatchByName(applications, requested, static (name, query) =>
+                    string.Equals(name, query, StringComparison.OrdinalIgnoreCase));
+                if (unqualifiedExact.Length > 0) return RequireUnique(unqualifiedExact);
+                break;
+            }
+        }
+
+        foreach (var suffix in new[] { "这个软件", "这个应用", "客户端", "软件", "应用" })
+        {
+            if (requested.EndsWith(suffix, StringComparison.Ordinal) && requested.Length > suffix.Length)
+            {
+                requested = requested[..^suffix.Length];
+                var unqualifiedExact = MatchByName(applications, requested, static (name, query) =>
+                    string.Equals(name, query, StringComparison.OrdinalIgnoreCase));
+                if (unqualifiedExact.Length > 0) return RequireUnique(unqualifiedExact);
+                break;
+            }
         }
 
         if (SafeAliases.TryGetValue(requested, out var alias))

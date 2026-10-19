@@ -7,6 +7,54 @@ namespace ScreenGuide.DesktopHost.Tests;
 
 public sealed class AssistantCommandServiceTests
 {
+    [Theory]
+    [InlineData("打开抖音", "application_not_found", false)]
+    [InlineData("打开我的抖音", "application_not_found", true)]
+    [InlineData("打开抖音", "application_ambiguous", true)]
+    [InlineData("打开抖音", "application_target_not_allowed", true)]
+    public async Task OnlyAbsentUnqualifiedApplicationMayFallBackToKnownWebsite(string text, string code, bool rejects)
+    {
+        await using var environment = DesktopHostTestEnvironment.Create();
+        using var host = environment.BuildHost(services =>
+            services.AddSingleton<IInstalledApplicationCatalog>(new RejectingApplicationCatalog(code)));
+        await host.StartAsync();
+        var client = new DesktopApiClient(environment.Options.PipeName);
+        if (rejects)
+        {
+            var error = await Assert.ThrowsAsync<DesktopApiException>(() =>
+                client.PlanAssistantCommandAsync(new PlanAssistantCommandRequestDto(text)));
+            Assert.Equal(code, error.Error.Code);
+        }
+        else
+        {
+            var plan = await client.PlanAssistantCommandAsync(new PlanAssistantCommandRequestDto(text));
+            Assert.Equal("OpenWebsite", plan.IntentKind);
+            Assert.Equal("https://www.douyin.com/", plan.CanonicalTarget);
+        }
+        await host.StopAsync();
+    }
+
+    [Theory]
+    [InlineData("打开抖音", "OpenApplication")]
+    [InlineData("打开我的抖音", "OpenApplication")]
+    [InlineData("打开抖音网站", "OpenWebsite")]
+    [InlineData("用 Google Chrome 打开抖音", "OpenWebsite")]
+    public async Task InstalledApplicationTakesPrecedenceUnlessWebsiteIsExplicit(string text, string expectedKind)
+    {
+        await using var environment = DesktopHostTestEnvironment.Create();
+        var application = new KnownDesktopApplication("fixture-douyin", "抖音",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "notepad.exe"), ["抖音", "我的抖音"]);
+        using var host = environment.BuildHost(services =>
+            services.AddSingleton<IInstalledApplicationCatalog>(new StaticApplicationCatalog(application)));
+        await host.StartAsync();
+        var client = new DesktopApiClient(environment.Options.PipeName);
+        var plan = await client.PlanAssistantCommandAsync(new PlanAssistantCommandRequestDto(text));
+        Assert.Equal(expectedKind, plan.IntentKind);
+        if (expectedKind == "OpenApplication") Assert.Equal(application.Id, plan.CanonicalTarget);
+        else Assert.Equal("https://www.douyin.com/", plan.CanonicalTarget);
+        await host.StopAsync();
+    }
+
     [Fact]
     public async Task SafeSettingsUsesBoundOneShotVisibleApplicationPath()
     {
@@ -248,7 +296,7 @@ public sealed class AssistantCommandServiceTests
     }
 
     [Fact]
-    public async Task CompoundBrowserSearchRequiresSeparateActions()
+    public async Task CompoundBrowserSearchPlansOneBoundWorkflowWithoutExecuting()
     {
         await using var environment = DesktopHostTestEnvironment.Create();
         var launcher = new RecordingLauncher();
@@ -264,9 +312,10 @@ public sealed class AssistantCommandServiceTests
             new PlanAssistantCommandRequestDto("打开谷歌浏览器界面并搜索打开抖音"));
         await host.StopAsync();
 
-        Assert.Equal("Unsupported", plan.IntentKind);
-        Assert.Equal("Unsupported", plan.Readiness);
-        Assert.Contains("分别确认", plan.UserSummary, StringComparison.Ordinal);
+        Assert.Equal("ApplicationSearch", plan.IntentKind);
+        Assert.Equal("Ready", plan.Readiness);
+        Assert.True(plan.RequiresConfirmation);
+        Assert.NotNull(plan.CanonicalTarget);
         Assert.Empty(launcher.Targets);
     }
 

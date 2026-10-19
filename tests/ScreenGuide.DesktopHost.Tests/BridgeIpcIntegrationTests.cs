@@ -12,7 +12,7 @@ using AgentTaskStatus = ScreenGuide.Core.Tasking.TaskStatus;
 
 namespace ScreenGuide.DesktopHost.Tests;
 
-public sealed class BridgeIpcIntegrationTests
+public sealed partial class BridgeIpcIntegrationTests
 {
     [Fact]
     public async Task HandshakeNegotiatesSnapshotOnlyAtDesktopProtocolV12()

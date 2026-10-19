@@ -234,7 +234,7 @@ public sealed class DesktopProductServicesTests
     }
 
     [Fact]
-    public void VoiceFirstHomeRemovesTextAndPushToTalkControls()
+    public void VoiceFirstHomeRequiresVisibleConsentAndExposesStop()
     {
         var root = FindRepositoryRoot();
         var mainWindow = File.ReadAllText(Path.Combine(
@@ -249,7 +249,10 @@ public sealed class DesktopProductServicesTests
             "OnboardingWindow.xaml"));
 
         Assert.Contains("VoiceStateText", mainWindow, StringComparison.Ordinal);
-        Assert.Contains("自动聆听", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("语音未开启", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("AutomationProperties.AutomationId=\"StartVoice\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("AutomationProperties.AutomationId=\"StopVoice\"", mainWindow, StringComparison.Ordinal);
+        Assert.DoesNotContain("元枢打开后会自动聆听", mainWindow, StringComparison.Ordinal);
         Assert.DoesNotContain("DashboardTaskTextBox", mainWindow, StringComparison.Ordinal);
         Assert.DoesNotContain("PushToTalkButton", mainWindow, StringComparison.Ordinal);
         Assert.DoesNotContain("发送文字", mainWindow, StringComparison.Ordinal);

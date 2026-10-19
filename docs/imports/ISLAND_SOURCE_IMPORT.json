@@ -1,0 +1,320 @@
+{
+  "sourceProject": "Yuanshu Island",
+  "sourceHead": "36df1f47287227e74b50f1335502b718850df9bb",
+  "includesUncommittedIntegration": true,
+  "destination": "src/Yuanshu.Island",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "2E787F1104EDDC31889D7B4948BB985BF6B26ED198AD6B144754D24D09C5283D"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "16E4CD0F7A642F5B4F96DCC87450A5E5F6F53F5EAD8E9ACB2748CFDA6EC538EA"
+    },
+    {
+      "path": "index.html",
+      "sha256": "7E4CE69F0F53D83B9A97FE40B11EDD9B25184379F97232257BC1C2F1D9474D2B"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "9FB58B36D2D828FECEB008483532EED5603949F428C7858D4010B018B2E12A5A"
+    },
+    {
+      "path": "package.json",
+      "sha256": "BB8B5A37CD47FD289E3282781E4B9B975BF6FA5191310CB08D9EF99EB0ADEA0D"
+    },
+    {
+      "path": "src-tauri/build.rs",
+      "sha256": "487059EAF8A947B80F20A9AACAC038A5047B2AD69D2401B827376C67D6FE847F"
+    },
+    {
+      "path": "src-tauri/capabilities/default.json",
+      "sha256": "6AB7FFE70BB8370D81EA95C43BAC9C31823AA73CF22E2ED56F4A7A496F117018"
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "E54B077A12BCC77E01B0DA49A41FC53661B80EFC5739E39F045E694BC03DD6D4"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "CA663AE214088283461B52D7F7135DBFF92AFA26BDEE54AD642D71405AD0E60F"
+    },
+    {
+      "path": "src-tauri/icons/128x128.png",
+      "sha256": "AC9299EEEB2521A41C3E2ACD6E83A164C4ABCB08D4DD4C093181B55A65723A8C"
+    },
+    {
+      "path": "src-tauri/icons/128x128@2x.png",
+      "sha256": "BDD58D6909B1373E1491D3B575717546C5EF9EACE4F5ECC89826DAF7F989CFF6"
+    },
+    {
+      "path": "src-tauri/icons/32x32.png",
+      "sha256": "1F54B5389BA6730538ED322D0BDA7C2A39CC41A93F9ADF1E76DCC4D080EE34BD"
+    },
+    {
+      "path": "src-tauri/icons/icon.ico",
+      "sha256": "CB7E20B98A4569F8A91A9CD8F3DECAD857BBAD92AA90F7419F4F0AD9F426C208"
+    },
+    {
+      "path": "src-tauri/icons/yuanshu-island.svg",
+      "sha256": "D64A1F30BEA902D05ED792E2262131C8DFE12497BA775B1E75A4A373D31DE525"
+    },
+    {
+      "path": "src-tauri/src/assistant_placement.rs",
+      "sha256": "FF6ED1ED40266B2C1556D3ABAA6C6950E5A42F32A3DE9E6913DE8C618D90769D"
+    },
+    {
+      "path": "src-tauri/src/assistant_surface.rs",
+      "sha256": "B43E7EE8656801C92F5E5940DDB6A5E999640B931C04D94BF2C548BBAB5F4279"
+    },
+    {
+      "path": "src-tauri/src/assistant.rs",
+      "sha256": "43CD63DDD8A8645484E54D7A833778EE92E9FCC4319D5DAFDB2985205BAF3E79"
+    },
+    {
+      "path": "src-tauri/src/autostart.rs",
+      "sha256": "E0EADB7ED2952A84305F9F2EB6E51B94DB5BEDC9B8284B8B8DDA6AFA52E76473"
+    },
+    {
+      "path": "src-tauri/src/bridge.rs",
+      "sha256": "220260602E5BBEE5719AF8EDED9926D50266F14EAE8F649A6CBA3D5AB0192DF1"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "9020B539C3CFCC4C780811A3687EF942DBB360A5D6AB6A9F7E243D08F3A1B87A"
+    },
+    {
+      "path": "src-tauri/src/main.rs",
+      "sha256": "8CD9B949244C24A7542403DAB71624EA4A85A44290DB44F5B208177D2FE89CE7"
+    },
+    {
+      "path": "src-tauri/src/media.rs",
+      "sha256": "12F975F9E09CEA9077D8D14BF940BA3D5D3CE7D39950982134F95E015959AEC1"
+    },
+    {
+      "path": "src-tauri/src/presence.rs",
+      "sha256": "E5A2DCD0EDE2C6F035CF3FDDD356DC64F2137BDD85D35E8A033451B4C227D5CF"
+    },
+    {
+      "path": "src-tauri/src/settings.rs",
+      "sha256": "956243EDC477A0ED4455437DB91C6174C1BF8E6732F0080EC1DD6DD23FAFC3A0"
+    },
+    {
+      "path": "src-tauri/src/tray/mod.rs",
+      "sha256": "D5090B1C93AF77ECD85C8BD517D57E37DE8225A4BC7E110EDE018C01DEE6DC02"
+    },
+    {
+      "path": "src-tauri/src/volume.rs",
+      "sha256": "E7D879353D116486959F180EE422D08046EEBB815D936F92FA13258C7316070B"
+    },
+    {
+      "path": "src-tauri/src/window/animation.rs",
+      "sha256": "BC34C7838DB53015F609A2F57EA7F21DB74AA14FE28A5210264843D46090C17F"
+    },
+    {
+      "path": "src-tauri/src/window/geometry.rs",
+      "sha256": "60C5BEF85332E8435B13C58A52576548B3B2F7AB6C6B4772CEBA57F519683E89"
+    },
+    {
+      "path": "src-tauri/src/window/mod.rs",
+      "sha256": "135C420205D8F66B07A89AB10BC847CB88A9FD33DF2A69EF4BAEE1556E09522E"
+    },
+    {
+      "path": "src-tauri/src/window/native_window.rs",
+      "sha256": "18A386D02A8A2F6DCF4013BE61BBE03EEB3EB1BF2B8F85080067CFB86C5E5E02"
+    },
+    {
+      "path": "src-tauri/tauri.conf.json",
+      "sha256": "ED7FE1519C5EFE9DBB9DBA8B03AE0BF27A1E1A4747058C79F40C1505ADE9F83F"
+    },
+    {
+      "path": "src/App.test.tsx",
+      "sha256": "7DA6FFA79235A0E3AEA8060D4235BAE99A1F344DCAAAA9754E304A5A5C80DD4C"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "4AF9DC4C29CA5810248AF75D8297A4C12A2DCFAD7905349130139160D69FBFD5"
+    },
+    {
+      "path": "src/assistant/assistant.css",
+      "sha256": "CEB0F3B2D6331C93BE0C3B87D63803CA97049264DD85394B429DDB4C35AE7C73"
+    },
+    {
+      "path": "src/assistant/assistant.test.tsx",
+      "sha256": "6D41E71B4DB344CCA9A0AD8430809964821A543E85F9717BCD12DCFCA071D31B"
+    },
+    {
+      "path": "src/assistant/AssistantIsland.tsx",
+      "sha256": "0622B7320041FACAD8F3D8AE3D2D1B11D3D94D2D517DD5991640AD31AC889968"
+    },
+    {
+      "path": "src/assistant/protocol.ts",
+      "sha256": "D190EC52E56AB8AB9FC84551C2F8B3545045B763CA8F314F18E45DDA5401F1AE"
+    },
+    {
+      "path": "src/assistant/useAssistantBridge.ts",
+      "sha256": "BA7367FEA483F25D09B92CE5AD1F7EF9DF79D3CD9574ECFB608A0C308E9E1FC3"
+    },
+    {
+      "path": "src/assistant/useAssistantDragHandle.ts",
+      "sha256": "7BEFCD5DE72B9E0FD614978484A9FA776B39CD97F48E3F68BD4ACCFDFFD9F522"
+    },
+    {
+      "path": "src/assistant/useAssistantInteraction.test.tsx",
+      "sha256": "4EE205FE7AABEB742408CE904ADF11C1CEF72397C97ACFEDC359702E403A2FF2"
+    },
+    {
+      "path": "src/assistant/useAssistantInteraction.ts",
+      "sha256": "0AF7CECA2471680FE55EED1E22C33C5138D24D85F1AFCF9DE4914041853B55F6"
+    },
+    {
+      "path": "src/assistant/useAssistantPlacement.test.tsx",
+      "sha256": "6196940EC652797E1BBC3FFFA4F71CA3BFEE549BD2B3A6A6B0F0537D4661062B"
+    },
+    {
+      "path": "src/assistant/useAssistantPlacement.ts",
+      "sha256": "6CAA27C9C7977EEA08177349105083311FD163EA11892E8A825174A24C027EC7"
+    },
+    {
+      "path": "src/assistant/useAssistantSurface.ts",
+      "sha256": "A83F6ED28A87A12AF324ADE68428F238068C6ABAACAEB5A1CA1D28E8ECCDEF97"
+    },
+    {
+      "path": "src/bridge/coreBridge.test.ts",
+      "sha256": "BAABA5DCC678551EBA275D00B70B46BA1DBB9A91DA4E5BA75E813428B6B778D4"
+    },
+    {
+      "path": "src/bridge/coreBridge.ts",
+      "sha256": "7AB2E5CE82B8F3FE5AD717E7A28433587DABA0F62D7B3550BC49661D68FFE573"
+    },
+    {
+      "path": "src/bridge/useCoreBridgeProvider.ts",
+      "sha256": "255591363F726F12978E5B53511EA7EF7A3B4935270917700E7AF0EF080C3685"
+    },
+    {
+      "path": "src/components/Island/Island.test.tsx",
+      "sha256": "A187D15536CF4B6FD7803784D0068A3F94D6F065DAE56E22B0A7865C7003278F"
+    },
+    {
+      "path": "src/components/Island/Island.tsx",
+      "sha256": "5E80B9AEC26F16BF65599837462F6E60D6115E5BA55B37822F51224C41D0CE07"
+    },
+    {
+      "path": "src/coordinator/coordinator.test.ts",
+      "sha256": "A73E111A976B3AF6055ED39FB13E1E98633F4B4210AB567CD4B4BA3BD12E1E76"
+    },
+    {
+      "path": "src/coordinator/index.ts",
+      "sha256": "2F7201615F5D5301BFD29842B54A6F3A5C6FDE9BDEB4165417CD67DED5F9179F"
+    },
+    {
+      "path": "src/coordinator/islandCoordinator.ts",
+      "sha256": "33740A6CFD2D71206730D1F8B68DE880175BF5F790B0409716385C9B7D6D30D0"
+    },
+    {
+      "path": "src/coordinator/types.ts",
+      "sha256": "4DF9B9F327EF829C0EE012CBBC7793EC6CDC37EAB2F73F5B3618E17412D90DB3"
+    },
+    {
+      "path": "src/dev/simulator.css",
+      "sha256": "E67D47C16E1D98AEB9734B18EEF22713669D2689B0DA7DF514B61172EE3D383E"
+    },
+    {
+      "path": "src/dev/SimulatorApp.test.tsx",
+      "sha256": "0E2D23FA03E8F3C71A781FA4241861A27F0375B2B81AC09A7269DD5E0641620C"
+    },
+    {
+      "path": "src/dev/SimulatorApp.tsx",
+      "sha256": "87BDF68BD3C87E851E1875DD36DCFAE1CC98F8F3975F63E80FCC3D18C8717E62"
+    },
+    {
+      "path": "src/hooks/useIslandController.ts",
+      "sha256": "A2455348045AC90F7D43CF7A594FBAD0B952A4D3DC0EC796C12562E73EA81B87"
+    },
+    {
+      "path": "src/hooks/useIslandCoordinator.test.tsx",
+      "sha256": "0674630DCF64AF69C959B03B91F4D183EA3EBFDD0E2AD9FC901066A809E919A2"
+    },
+    {
+      "path": "src/hooks/useIslandCoordinator.ts",
+      "sha256": "258312C2AE5B7FE8F34C72E460B60AE2F1C7B2F1ED39DA158142F45955C1DE96"
+    },
+    {
+      "path": "src/main.tsx",
+      "sha256": "26BDAA034B3EE996B875984AD441748F4FA1C41E3A5A65F8F6DA3AE82C07A6F2"
+    },
+    {
+      "path": "src/panel/panel.css",
+      "sha256": "FEF3320D623735568607FC6970806832C9D46244426B755D601683C687227753"
+    },
+    {
+      "path": "src/panel/Panel.test.tsx",
+      "sha256": "39C6273C8E8A386FC92BCD3008E791E96925FE401A6B4EE4B92FB4A8664E2A5D"
+    },
+    {
+      "path": "src/panel/Panel.tsx",
+      "sha256": "4130F0F06D05FA9C2F3F78B829D4FB367F07955FF3763EF5269786F9E259FDF7"
+    },
+    {
+      "path": "src/presence/presencePolicy.test.ts",
+      "sha256": "B61C0C36F13E11C3519505AD3255A10D969D58C0EAD73701173A2896C678A9E7"
+    },
+    {
+      "path": "src/presence/presencePolicy.ts",
+      "sha256": "C34DAC7023BFC5B3BD601E58542F9491FD779BD57770D6EDC2340D4041ECAB96"
+    },
+    {
+      "path": "src/presence/usePresenceProjection.ts",
+      "sha256": "4E291C088F6BDCE6017BA76827F648A7307CC899E4FCE1618082363055FC902D"
+    },
+    {
+      "path": "src/providers/windowsMedia.test.ts",
+      "sha256": "BC6EA5814CCAA4EF635BF8FD96DA89983A44AD878AF992A04BE10947B037E1EF"
+    },
+    {
+      "path": "src/providers/windowsMedia.ts",
+      "sha256": "F42359FE3628F5CBB6650BBE051A77C871E21235B06B4D86D5C559B45BEA8EF1"
+    },
+    {
+      "path": "src/providers/windowsVolume.test.ts",
+      "sha256": "333643078AB4D4700301EF1B33A40B2E6E0B2CA4E0F788107F04FF2213AEBC83"
+    },
+    {
+      "path": "src/providers/windowsVolume.ts",
+      "sha256": "35B78306A6E792C4109D4DC5683D2006B36EB2DF25E483CD7036114D926D4639"
+    },
+    {
+      "path": "src/settings/useSettings.ts",
+      "sha256": "F3670D524CD3C87F75343F504DDB0187706D8BFEA30CE7FE66D47CF3599F4795"
+    },
+    {
+      "path": "src/styles/global.css",
+      "sha256": "9A8318BBCDAB75C714646B3D2371C78C457621F6F17A965D594B6B25C952F7C3"
+    },
+    {
+      "path": "src/test/setup.ts",
+      "sha256": "F6DACD0C48CAA5C15C870A23F157A9801EEA0C792F9C6E4D9A29374FA10B3E39"
+    },
+    {
+      "path": "src/vite-env.d.ts",
+      "sha256": "65996936FBB042915F7B74A200FCDDE7E410F32A669B1AB9597CFAA4B0FADDB5"
+    },
+    {
+      "path": "tsconfig.app.json",
+      "sha256": "BA158A678C61D303FD5F1548C74F44F6075612831ACD726317833E1DCF4A5451"
+    },
+    {
+      "path": "tsconfig.json",
+      "sha256": "770B4140BBB581E2DFD9EA9946FFC9C75A1D86BA7D2DB5F77C83E37CBDF9D808"
+    },
+    {
+      "path": "tsconfig.node.json",
+      "sha256": "48D9C6B9B13D732701592EA44E16FC7BC953376E79820E3D18E79345816884AF"
+    },
+    {
+      "path": "vite.config.ts",
+      "sha256": "7E0595FDDAA7A2CDBDC8C6C01363ABA25865FC676FE51DE809D8AD3AC92DB12F"
+    }
+  ]
+}

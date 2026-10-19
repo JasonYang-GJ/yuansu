@@ -1,0 +1,42 @@
+diff --git a/src/ScreenGuide.Skills.Windows/DesktopAutomationServices.cs b/src/ScreenGuide.Skills.Windows/DesktopAutomationServices.cs
+index 13b20e3..a14bb28 100644
+--- a/src/ScreenGuide.Skills.Windows/DesktopAutomationServices.cs
++++ b/src/ScreenGuide.Skills.Windows/DesktopAutomationServices.cs
+@@ -1012,22 +1012,27 @@ internal class WindowsDesktopSearchAutomationDriver : IDesktopSearchAutomationDr
+             && current.OwnerWindowHandle == expected.OwnerWindowHandle
+             && current.AutomationId == expected.AutomationId && current.HelpText == expected.HelpText && current.LabeledBy == expected.LabeledBy
+             && SafeForegroundSearchExecutor.IsReliableCandidate(current, expected.OwnerWindowHandle);
+-        if (!IsBound(ReadToken(token)) || GetForegroundWindowHandle() != expected.OwnerWindowHandle
+-            || !token.Element.TryGetCurrentPattern(InvokePattern.Pattern, out var rawPattern)) return false;
+         validateAtFocusBoundary();
+-        if (!IsBound(ReadToken(token)) || GetForegroundWindowHandle() != expected.OwnerWindowHandle) return false;
++        var initial = ReadToken(token);
++        if (!IsBound(initial) || GetForegroundWindowHandle() != expected.OwnerWindowHandle) return false;
++        if (initial.HasKeyboardFocus) return true;
++        if (!token.Element.TryGetCurrentPattern(InvokePattern.Pattern, out var rawPattern)) return false;
++        validateAtFocusBoundary();
++        var beforeInvoke = ReadToken(token);
++        if (!IsBound(beforeInvoke) || GetForegroundWindowHandle() != expected.OwnerWindowHandle) return false;
++        if (beforeInvoke.HasKeyboardFocus) return true;
+         validateAtFocusBoundary();
+         ((InvokePattern)rawPattern).Invoke();
+         // Invoke is only on the same proven search input; it is not a result click or a pointer action.
+-        for (var attempt = 0; attempt < 6; attempt++)
++        // CEF can report focus later than the old six-sample window. Observe this one
++        // request until focus arrives or the bounded deadline expires; never invoke twice.
++        return BoundSearchFocusWait.Run(() =>
+         {
+-            validateAtFocusBoundary();
+             var current = ReadToken(token);
+-            if (!IsBound(current) || GetForegroundWindowHandle() != expected.OwnerWindowHandle) return false;
+-            if (current.HasKeyboardFocus) return true;
+-            if (attempt < 5) Thread.Sleep(50);
+-        }
+-        return false;
++            if (!IsBound(current) || GetForegroundWindowHandle() != expected.OwnerWindowHandle)
++                throw new ElementNotAvailableException();
++            return current.HasKeyboardFocus;
++        }, validateAtFocusBoundary);
+     }
+ 
+     public void SetValue(DesktopSearchControl control, string value)

@@ -8,6 +8,211 @@ public sealed class ApplicationActivationHandoffTests
         new(2026, 9, 2, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void UniqueExactExecutableAlreadyOpenIsActivatedWithoutRelaunchOrFixedWait()
+    {
+        var window = ExistingApplication();
+        var runtime = new ScriptedActivationRuntime([window]) { BeforeStartWindows = [window] };
+        var result = new DesktopProcessLauncher(runtime, TimeSpan.FromSeconds(3)).OpenApplicationVisible(
+            new("example", "示例软件", window.Process.ExecutablePath!), CancellationToken.None);
+        Assert.Equal(window.Handle.ToInt64(), result.WindowHandle);
+        Assert.Equal(0, runtime.StartCount);
+        Assert.Equal(0, runtime.WaitCount);
+        Assert.Equal(1, runtime.ActivationCount);
+    }
+
+    [Theory]
+    [InlineData("pid")]
+    [InlineData("creation-time")]
+    [InlineData("executable")]
+    public void ExistingWindowIdentityChangeDuringActivationCannotRelaunchOrSucceed(string mutation)
+    {
+        var window = ExistingApplication();
+        var changed = false;
+        var runtime = new ScriptedActivationRuntime([window])
+        {
+            BeforeStartWindows = [window], BeforeActivate = () => changed = true,
+            ReadWindowOverride = _ => !changed ? window : window with { Process = mutation switch
+            {
+                "pid" => window.Process with { ProcessId = 301 },
+                "creation-time" => window.Process with { ProcessStartTimeUtc = AttemptTime },
+                _ => window.Process with { ExecutablePath = @"C:\Other\example.exe" }
+            } }
+        };
+        Assert.Throws<InstalledApplicationResolutionException>(() =>
+            new DesktopProcessLauncher(runtime, TimeSpan.FromSeconds(3)).OpenApplicationVisible(
+                new("example", "示例软件", window.Process.ExecutablePath!), CancellationToken.None));
+        Assert.Equal(0, runtime.StartCount);
+        Assert.Equal(0, runtime.WaitCount);
+    }
+
+    [Fact]
+    public void ExistingWindowActivationRemainsCancellableWithoutRelaunch()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var window = ExistingApplication();
+        var runtime = new ScriptedActivationRuntime([window])
+        { BeforeStartWindows = [window], BeforeActivate = cancellation.Cancel };
+        Assert.Throws<OperationCanceledException>(() =>
+            new DesktopProcessLauncher(runtime, TimeSpan.FromSeconds(3)).OpenApplicationVisible(
+                new("example", "示例软件", window.Process.ExecutablePath!), cancellation.Token));
+        Assert.Equal(0, runtime.StartCount);
+    }
+
+    [Fact]
+    public void SameNamedExecutableAtAnotherPathCannotUseImmediateReuse()
+    {
+        var window = ExistingApplication();
+        var untrusted = window with { Handle = new IntPtr(4000), Process = window.Process with
+        { ProcessId = 400, ExecutablePath = @"C:\Other\example.exe" } };
+        var runtime = new ScriptedActivationRuntime([window]) { BeforeStartWindows = [untrusted] };
+        var result = new DesktopProcessLauncher(runtime, TimeSpan.FromSeconds(3)).OpenApplicationVisible(
+            new("example", "示例软件", window.Process.ExecutablePath!), CancellationToken.None);
+        Assert.Equal(window.Handle.ToInt64(), result.WindowHandle);
+        Assert.Equal(1, runtime.StartCount);
+    }
+
+    [Fact]
+    public void MultipleExistingWindowsRetainOriginalLaunchDiscoveryInsteadOfImmediateFirstMatch()
+    {
+        var window = ExistingApplication();
+        var other = window with { Handle = new IntPtr(4000), Process = window.Process with { ProcessId = 400 } };
+        var launched = window with { Handle = new IntPtr(5000), Process = window.Process with { ProcessId = 500 } };
+        var runtime = new ScriptedActivationRuntime([launched]) { BeforeStartWindows = [window, other] };
+        var result = new DesktopProcessLauncher(runtime, TimeSpan.FromSeconds(3)).OpenApplicationVisible(
+            new("example", "示例软件", window.Process.ExecutablePath!), CancellationToken.None);
+        Assert.Equal(launched.Handle.ToInt64(), result.WindowHandle);
+        Assert.Equal(1, runtime.StartCount);
+    }
+
+    private static ApplicationWindowSnapshot ExistingApplication() => new(new IntPtr(3000), "示例软件",
+        new(300, "example", AttemptTime.AddMinutes(-10), true, @"C:\Example\example.exe", null, null, null));
+
+    [Fact]
+    public void SystemNotepadLauncherAcceptsExactMicrosoftPackageHandoff()
+    {
+        var window = TrustedNotepadWindow();
+        var runtime = new ScriptedActivationRuntime([window]);
+        var launcher = new DesktopProcessLauncher(runtime, TimeSpan.FromMilliseconds(300));
+
+        var result = launcher.OpenApplicationVisible(Notepad(), CancellationToken.None);
+
+        Assert.Equal(1, runtime.StartCount);
+        Assert.Equal(Notepad().LaunchTarget, runtime.StartedFileName);
+        Assert.Equal(window.Process.ProcessId, result.ProcessId);
+        Assert.Equal(window.Handle.ToInt64(), result.WindowHandle);
+        Assert.Equal(1, runtime.ActivationCount);
+    }
+
+    [Fact]
+    public void SystemNotepadReusesOneVerifiedPackagedWindowWithoutStartingAnotherProcess()
+    {
+        var window = TrustedNotepadWindow();
+        var runtime = new ScriptedActivationRuntime([window]) { BeforeStartWindows = [window] };
+        var result = new DesktopProcessLauncher(runtime, TimeSpan.FromMilliseconds(300))
+            .OpenApplicationVisible(Notepad(), CancellationToken.None);
+        Assert.Equal(window.Handle.ToInt64(), result.WindowHandle);
+        Assert.Equal(0, runtime.StartCount);
+        Assert.Equal(0, runtime.WaitCount);
+        Assert.Equal(1, runtime.ActivationCount);
+    }
+
+    [Theory]
+    [InlineData("untrusted-path")]
+    [InlineData("different-package-directory")]
+    [InlineData("different-executable-in-package")]
+    [InlineData("relative-path")]
+    [InlineData("wrong-family")]
+    [InlineData("missing-family")]
+    [InlineData("wrong-aumid")]
+    [InlineData("wrong-package")]
+    [InlineData("wrong-publisher")]
+    [InlineData("malformed-version")]
+    [InlineData("path-in-package-name")]
+    [InlineData("not-running")]
+    [InlineData("missing-process-id")]
+    [InlineData("missing-start-time")]
+    public void SystemNotepadRejectsUntrustedPackageHandoffsBeforeActivation(string mutation)
+    {
+        var window = TrustedNotepadWindow();
+        var process = window.Process;
+        process = mutation switch
+        {
+            "untrusted-path" => process with { ExecutablePath = @"C:\Untrusted\Notepad.exe" },
+            "different-package-directory" => process with { ExecutablePath = process.ExecutablePath!.Replace("11.2607.14.0", "11.2607.15.0") },
+            "different-executable-in-package" => process with { ExecutablePath = Path.Combine(Path.GetDirectoryName(process.ExecutablePath!)!, "Other.exe") },
+            "relative-path" => process with { ExecutablePath = @"Notepad\Notepad.exe" },
+            "wrong-family" => process with { PackageFamilyName = "Contoso.Notepad_8wekyb3d8bbwe" },
+            "missing-family" => process with { PackageFamilyName = null },
+            "wrong-aumid" => process with { ApplicationUserModelId = "Microsoft.WindowsNotepad_8wekyb3d8bbwe!Other" },
+            "wrong-package" => process with { PackageFullName = "Contoso.Notepad_11.2607.14.0_x64__8wekyb3d8bbwe" },
+            "wrong-publisher" => process with { PackageFullName = "Microsoft.WindowsNotepad_11.2607.14.0_x64__untrusted" },
+            "malformed-version" => process with { PackageFullName = "Microsoft.WindowsNotepad_untrusted_x64__8wekyb3d8bbwe" },
+            "path-in-package-name" => process with { PackageFullName = @"Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\..\Other" },
+            "not-running" => process with { IsRunning = false },
+            "missing-process-id" => process with { ProcessId = 0 },
+            "missing-start-time" => process with { ProcessStartTimeUtc = default },
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation))
+        };
+        var runtime = new ScriptedActivationRuntime([window with { Process = process }]);
+        var error = Assert.Throws<InstalledApplicationResolutionException>(() =>
+            new DesktopProcessLauncher(runtime, TimeSpan.FromMilliseconds(300))
+                .OpenApplicationVisible(Notepad(), CancellationToken.None));
+        Assert.Equal(InstalledApplicationErrorCodes.TargetChanged, error.Code);
+        Assert.Equal(0, runtime.ActivationCount);
+    }
+
+    [Theory]
+    [InlineData("target")]
+    [InlineData("application-id")]
+    public void NotepadPackageCannotSatisfyAnotherAuthorizedTarget(string mutation)
+    {
+        var application = mutation == "target"
+            ? Notepad() with { LaunchTarget = @"C:\Untrusted\notepad.exe" }
+            : Notepad() with { Id = "another-application" };
+        var runtime = new ScriptedActivationRuntime([TrustedNotepadWindow()]);
+        Assert.Throws<InstalledApplicationResolutionException>(() =>
+            new DesktopProcessLauncher(runtime, TimeSpan.FromMilliseconds(300))
+                .OpenApplicationVisible(application, CancellationToken.None));
+        Assert.Equal(0, runtime.ActivationCount);
+    }
+
+    [Theory]
+    [InlineData("family")]
+    [InlineData("aumid")]
+    [InlineData("path")]
+    public void NotepadPackageIdentityChangeDuringActivationRejectsSuccess(string mutation)
+    {
+        var window = TrustedNotepadWindow();
+        var changed = false;
+        var runtime = new ScriptedActivationRuntime([window])
+        {
+            BeforeActivate = () => changed = true,
+            ReadWindowOverride = _ => !changed ? window : window with { Process = mutation switch
+            {
+                "family" => window.Process with { PackageFamilyName = "Contoso.Notepad_8wekyb3d8bbwe" },
+                "aumid" => window.Process with { ApplicationUserModelId = "Microsoft.WindowsNotepad_8wekyb3d8bbwe!Other" },
+                _ => window.Process with { ExecutablePath = @"C:\Untrusted\Notepad.exe" }
+            } }
+        };
+        Assert.Throws<InstalledApplicationResolutionException>(() =>
+            new DesktopProcessLauncher(runtime, TimeSpan.FromMilliseconds(300))
+                .OpenApplicationVisible(Notepad(), CancellationToken.None));
+        Assert.Equal(1, runtime.ActivationCount);
+    }
+
+    [Fact]
+    public void CancellationDuringNotepadPackageActivationRejectsSuccess()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var runtime = new ScriptedActivationRuntime([TrustedNotepadWindow()])
+        { BeforeActivate = cancellation.Cancel };
+        Assert.Throws<OperationCanceledException>(() =>
+            new DesktopProcessLauncher(runtime, TimeSpan.FromMilliseconds(300))
+                .OpenApplicationVisible(Notepad(), cancellation.Token));
+        Assert.Equal(1, runtime.ActivationCount);
+    }
+
+    [Fact]
     public void TrustedCalculatorLauncherAcceptsExactPackageHandoff()
     {
         var window = TrustedCalculatorWindow(200, 2000, AttemptTime.AddMilliseconds(20));
@@ -235,6 +440,21 @@ public sealed class ApplicationActivationHandoffTests
         "calculator",
         "计算器",
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "calc.exe"));
+
+    private static KnownDesktopApplication Notepad() => new(
+        "notepad", "记事本",
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "notepad.exe"));
+
+    private static ApplicationWindowSnapshot TrustedNotepadWindow()
+    {
+        const string packageFullName = "Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe";
+        return new(new IntPtr(4200), "无标题 - 记事本", new(
+            420, "Notepad", AttemptTime.AddMilliseconds(20), true,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "WindowsApps", packageFullName, "Notepad", "Notepad.exe"),
+            "Microsoft.WindowsNotepad_8wekyb3d8bbwe", packageFullName,
+            "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"));
+    }
 
     private static ApplicationWindowSnapshot TrustedCalculatorWindow(
         int processId,

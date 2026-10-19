@@ -155,7 +155,7 @@ public sealed class DesktopProcessAcceptanceTests
                 throw new InvalidOperationException($"DesktopClient exited with {process.ExitCode}.");
             }
 
-            var window = FindWindow(process.Id, "ScreenGuide Desktop");
+            var window = FindWindow(process.Id, "元枢 · 管理");
             if (window != IntPtr.Zero)
             {
                 return window;
@@ -236,8 +236,7 @@ public sealed class DesktopProcessAcceptanceTests
                 var className = new StringBuilder(256);
                 _ = GetClassName(window, className, className.Capacity);
                 if (string.Equals(title.ToString(), expectedTitle, StringComparison.Ordinal)
-                    || IsWindowVisible(window)
-                    && className.ToString().StartsWith("HwndWrapper", StringComparison.Ordinal))
+                    && IsWindowVisible(window))
                 {
                     match = window;
                     return false;

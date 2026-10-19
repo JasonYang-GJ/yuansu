@@ -50,6 +50,9 @@ public static class SessionUiPresenter
                    ?? snapshot.Turns.OrderBy(item => item.SequenceNumber).LastOrDefault();
         var phase = turn?.Phase ?? "Ready";
         var status = PhaseText(phase);
+        if (phase == "Executing" && turn?.IntentKind == "ApplicationSearch"
+            && !string.IsNullOrWhiteSpace(turn.ResultSummary))
+            status = (turn.ResultSummary, "Busy");
         var waitingProject = phase == "WaitingForProject";
         var waitingFile = phase == "WaitingForFile";
         var waitingWindow = phase == "WaitingForWindow";

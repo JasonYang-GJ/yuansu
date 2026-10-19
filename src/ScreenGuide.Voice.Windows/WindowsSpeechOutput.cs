@@ -23,6 +23,7 @@ public sealed class WindowsSpeechOutput
 
     public async Task SpeakAsync(string text, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(text))
         {
             return;
@@ -61,10 +62,24 @@ public sealed class WindowsSpeechOutput
         }
 
         synthesizer.SpeakCompleted += Completed;
-        using var registration = cancellationToken.Register(synthesizer.SpeakAsyncCancelAll);
+        var queueGate = new object();
+        using var registration = cancellationToken.Register(() =>
+        {
+            lock (queueGate)
+            {
+                synthesizer.SpeakAsyncCancelAll();
+            }
+        });
         try
         {
-            synthesizer.SpeakAsync(text.Trim());
+            // Cancellation must either prevent enqueueing or cancel the enqueued prompt.
+            // Cancelling an empty queue before enqueueing would otherwise still speak.
+            lock (queueGate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                synthesizer.SpeakAsync(text.Trim());
+            }
+
             await completion.Task.ConfigureAwait(false);
         }
         finally

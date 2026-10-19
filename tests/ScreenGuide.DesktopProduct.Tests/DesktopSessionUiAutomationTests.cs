@@ -122,8 +122,19 @@ public sealed class DesktopSessionUiAutomationTests
                 syntheticWindowProcess,
                 SyntheticWindowTitle,
                 TimeSpan.FromSeconds(10));
-            FocusWindow(syntheticWindow);
-            await Task.Delay(TimeSpan.FromSeconds(1));
+            // Wait for the Host's 400 ms foreground tracker to observe this exact fixture,
+            // as well as checking the actual foreground. Focusing alone can still leave
+            // the read-only planning cache on the previously focused application.
+            // Planning never grants capture consent and never executes the request.
+            await WaitUntilAsync(async () =>
+            {
+                if (GetForegroundWindow() != syntheticWindow) FocusWindow(syntheticWindow);
+                var plan = await api.PlanAssistantCommandAsync(new PlanAssistantCommandRequestDto(
+                    "看看这个窗口是什么"));
+                return GetForegroundWindow() == syntheticWindow
+                    && plan.ForegroundApplication?.WindowHandle == syntheticWindow.ToInt64()
+                    && plan.ForegroundApplication.WindowTitle == SyntheticWindowTitle;
+            }, TimeSpan.FromSeconds(10));
 
             var windowTurn = await api.SubmitSessionInputAsync(new SessionInputRequestDto(
                 "看看这个窗口是什么",
@@ -258,7 +269,7 @@ public sealed class DesktopSessionUiAutomationTests
                 throw new InvalidOperationException($"DesktopClient 已退出，退出码 {process.ExitCode}。");
             }
 
-            var window = FindTopLevelWindow(process.Id, expectedTitle: "元枢");
+            var window = FindTopLevelWindow(process.Id, expectedTitle: "元枢 · 管理");
             if (window != IntPtr.Zero)
             {
                 return window;
@@ -619,6 +630,9 @@ public sealed class DesktopSessionUiAutomationTests
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

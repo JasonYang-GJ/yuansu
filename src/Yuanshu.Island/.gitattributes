@@ -1,0 +1,2 @@
+# Tauri rewrites this manifest with LF during its version consistency check.
+src-tauri/Cargo.toml text eol=lf

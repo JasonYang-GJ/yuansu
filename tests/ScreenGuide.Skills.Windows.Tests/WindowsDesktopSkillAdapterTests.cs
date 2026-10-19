@@ -6,6 +6,82 @@ namespace ScreenGuide.Skills.Windows.Tests;
 public sealed class WindowsDesktopSkillAdapterTests
 {
     [Fact]
+    public async Task ApplicationWorkflowReturnsOnlyStructuredVerifiedEvidence()
+    {
+        var catalog = new FakeCatalog();
+        var app = catalog.FindById("test-app")!;
+        var workflow = new ApplicationSearchWorkflow(app.Id, "示例音乐");
+        var execution = new RecordingWorkflow();
+        var adapter = new WindowsDesktopSkillAdapter(new RecordingLauncher(), catalog, new RecordingAutomation(), execution);
+        var start = await adapter.StartAsync(Request(WindowsDesktopCapabilities.ApplicationSearchWorkflow,
+            new("SearchApplication", app.Id, Argument: workflow.Query,
+                ApplicationTargetBinding: InstalledApplicationCatalog.CreateTargetBinding(app), ApplicationSearch: workflow)));
+        var final = await adapter.GetFinalResultAsync(start.Run);
+        Assert.True(final!.Succeeded);
+        var data = JsonSerializer.Deserialize<ApplicationSearchWorkflowResult>(final.DataJson!);
+        Assert.True(data!.ResultsVerified);
+        Assert.False(data.FollowUpInvoked);
+        Assert.Equal(1, execution.Calls);
+        Assert.DoesNotContain(workflow.Query, final.DataJson);
+    }
+
+    [Theory]
+    [InlineData("kind")]
+    [InlineData("app")]
+    [InlineData("query")]
+    [InlineData("binding")]
+    [InlineData("missing-workflow")]
+    public async Task MismatchedWorkflowInputNeverExecutes(string change)
+    {
+        var catalog = new FakeCatalog();
+        var app = catalog.FindById("test-app")!;
+        var workflow = new ApplicationSearchWorkflow(app.Id, "示例音乐");
+        var input = new WindowsDesktopActionInput("SearchApplication", app.Id, Argument: workflow.Query,
+            ApplicationTargetBinding: InstalledApplicationCatalog.CreateTargetBinding(app), ApplicationSearch: workflow);
+        input = change switch
+        {
+            "kind" => input with { ActionKind = "OpenApplication" },
+            "app" => input with { Target = "other" },
+            "query" => input with { Argument = "other" },
+            "binding" => input with { ApplicationTargetBinding = new string('0', 64) },
+            _ => input with { ApplicationSearch = null }
+        };
+        var execution = new RecordingWorkflow();
+        var adapter = new WindowsDesktopSkillAdapter(new RecordingLauncher(), catalog, new RecordingAutomation(), execution);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => adapter.StartAsync(Request(WindowsDesktopCapabilities.ApplicationSearchWorkflow, input)));
+        Assert.Equal(0, execution.Calls);
+    }
+
+    [Theory]
+    [InlineData("application")]
+    [InlineData("submission")]
+    [InlineData("results")]
+    [InlineData("unexpected-action")]
+    [InlineData("play-unverified")]
+    public async Task IncompleteOrUnauthorizedFollowUpCannotReturnSucceeded(string change)
+    {
+        var catalog = new FakeCatalog();
+        var app = catalog.FindById("test-app")!;
+        var workflow = new ApplicationSearchWorkflow(app.Id, "示例音乐",
+            change == "play-unverified" ? ApplicationSearchFollowUp.PlayFirst : ApplicationSearchFollowUp.None);
+        var good = new ApplicationSearchWorkflowResult(true, true, true, false, false, false, "已验证结果列表。");
+        var result = change switch
+        {
+            "application" => good with { ApplicationVerified = false },
+            "submission" => good with { QuerySubmitted = false },
+            "results" => good with { ResultsVerified = false },
+            "unexpected-action" => good with { FollowUpInvoked = true, FollowUpVerified = true },
+            _ => good with { FollowUpInvoked = true }
+        };
+        var adapter = new WindowsDesktopSkillAdapter(new RecordingLauncher(), catalog, new RecordingAutomation(), new RecordingWorkflow { Result = result });
+        var error = await Assert.ThrowsAsync<ApplicationSearchWorkflowException>(() => adapter.StartAsync(Request(
+            WindowsDesktopCapabilities.ApplicationSearchWorkflow,
+            new("SearchApplication", app.Id, Argument: workflow.Query,
+                ApplicationTargetBinding: InstalledApplicationCatalog.CreateTargetBinding(app), ApplicationSearch: workflow))));
+        Assert.Equal("application_search_incomplete", error.Code);
+    }
+
+    [Fact]
     public async Task OnlyCatalogApplicationIdCanLaunch()
     {
         var launcher = new RecordingLauncher();
@@ -305,6 +381,18 @@ public sealed class WindowsDesktopSkillAdapterTests
             [new SkillResourceScope("Test", null, "explicit-target", "Execute")],
             SkillAuthorizationOrigin.ExplicitUser,
             Guid.NewGuid());
+
+    private sealed class RecordingWorkflow : IApplicationSearchWorkflowAutomation
+    {
+        public int Calls { get; private set; }
+        public ApplicationSearchWorkflowResult Result { get; init; } = new(true, true, true, false, false, false, "已验证结果列表。");
+        public Task<ApplicationSearchWorkflowResult> ExecuteAsync(KnownDesktopApplication application, string expectedApplicationTargetBinding,
+            ApplicationSearchWorkflow workflow, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(Result);
+        }
+    }
 
     private sealed class FakeCatalog : IInstalledApplicationCatalog
     {

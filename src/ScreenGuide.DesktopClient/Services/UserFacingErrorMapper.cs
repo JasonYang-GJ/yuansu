@@ -47,6 +47,10 @@ public static class UserFacingErrorMapper
 
         return exception switch
         {
+            VoiceSubmissionUnconfirmedException => new UserFacingError(
+                "这条请求尚未收到确认，不能确认是否已停止。",
+                "请查看当前任务并重试停止；程序不会重发这条请求。",
+                SensitiveDataSanitizer.ExceptionType(exception)),
             TimeoutException => new UserFacingError(
                 "本机中枢没有响应。",
                 "等待几秒后重试，程序会自动尝试恢复连接。",

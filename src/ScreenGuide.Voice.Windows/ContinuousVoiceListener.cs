@@ -16,15 +16,22 @@ public sealed record ContinuousVoiceStatus(
     ContinuousVoiceState State,
     string Message);
 
+public sealed record VoicePartialText(string Text, long RecognitionGeneration);
+
 public sealed record VoiceUtterance(
     string Text,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    long RecognitionGeneration = 0);
 
 public interface IContinuousVoiceListener : IAsyncDisposable
 {
     bool IsListening { get; }
 
-    event EventHandler<string>? PartialTextChanged;
+    long RecognitionGeneration { get; }
+
+    Task<long> ResetRecognitionAsync(CancellationToken cancellationToken = default);
+
+    event EventHandler<VoicePartialText>? PartialTextChanged;
 
     event EventHandler<VoiceUtterance>? UtteranceRecognized;
 
@@ -44,6 +51,8 @@ public interface IContinuousVoiceListener : IAsyncDisposable
 public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
 {
     private readonly object _sync = new();
+    private readonly SemaphoreSlim _captureChanges = new(1, 1);
+    private long _recognitionGeneration;
     private readonly LocalVoiceModelPaths _paths;
     private WaveInEvent? _microphone;
     private OnlineRecognizer? _recognizer;
@@ -51,6 +60,7 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
     private DateTimeOffset? _utteranceStartedAt;
     private string _partialText = string.Empty;
     private bool _stopping;
+    private CancellationToken _captureCancellation;
 
     public OfflineContinuousVoiceListener(LocalVoiceModelPaths? paths = null)
     {
@@ -68,7 +78,9 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
         }
     }
 
-    public event EventHandler<string>? PartialTextChanged;
+    public long RecognitionGeneration { get { lock (_sync) return _recognitionGeneration; } }
+
+    public event EventHandler<VoicePartialText>? PartialTextChanged;
 
     public event EventHandler<VoiceUtterance>? UtteranceRecognized;
 
@@ -92,14 +104,30 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
             message);
     }
 
-    public Task StartAsync(CancellationToken cancellationToken = default)
+    public Task StartAsync(CancellationToken cancellationToken = default) =>
+        ChangeCaptureAsync(() => { StartCore(cancellationToken); return true; }, cancellationToken);
+
+    public Task StopAsync() => ChangeCaptureAsync(() => { StopCore(); return true; }, CancellationToken.None);
+
+    public Task<long> ResetRecognitionAsync(CancellationToken cancellationToken = default) =>
+        ChangeCaptureAsync(() => ResetRecognitionCore(cancellationToken), cancellationToken);
+
+    private async Task<T> ChangeCaptureAsync<T>(Func<T> change, CancellationToken cancellationToken)
+    {
+        await _captureChanges.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await Task.Run(change, cancellationToken).ConfigureAwait(false); }
+        finally { _captureChanges.Release(); }
+    }
+
+    private void StartCore(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_sync)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (_microphone is not null)
             {
-                return Task.CompletedTask;
+                return;
             }
 
             if (!_paths.IsComplete)
@@ -116,22 +144,16 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
 
             try
             {
+                _recognitionGeneration++;
                 _recognizer = OfflineVoiceRecognizerFactory.Create(_paths);
                 _stream = _recognizer.CreateStream();
                 _partialText = string.Empty;
                 _utteranceStartedAt = null;
                 _stopping = false;
+                _captureCancellation = cancellationToken;
                 cancellationToken.ThrowIfCancellationRequested();
-                _microphone = new WaveInEvent
-                {
-                    DeviceNumber = 0,
-                    WaveFormat = new WaveFormat(OfflineVoiceRecognizerFactory.SampleRate, 16, 1),
-                    BufferMilliseconds = 80,
-                    NumberOfBuffers = 4
-                };
-                _microphone.DataAvailable += OnAudio;
-                _microphone.RecordingStopped += OnRecordingStopped;
-                _microphone.StartRecording();
+                StartMicrophone(cancellationToken);
+                RaiseState(ContinuousVoiceState.Listening, "正在聆听");
             }
             catch
             {
@@ -140,11 +162,10 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
             }
         }
 
-        RaiseState(ContinuousVoiceState.Listening, "正在聆听");
-        return Task.CompletedTask;
+        return;
     }
 
-    public Task StopAsync()
+    private void StopCore()
     {
         WaveInEvent? microphone;
         lock (_sync)
@@ -171,20 +192,75 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
         }
 
         RaiseState(ContinuousVoiceState.Stopped, "语音监听已停止");
-        return Task.CompletedTask;
+    }
+
+    private void StartMicrophone(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _microphone = new WaveInEvent
+        {
+            DeviceNumber = 0,
+            WaveFormat = new WaveFormat(OfflineVoiceRecognizerFactory.SampleRate, 16, 1),
+            BufferMilliseconds = 80,
+            NumberOfBuffers = 4
+        };
+        _microphone.DataAvailable += OnAudio;
+        _microphone.RecordingStopped += OnRecordingStopped;
+        _microphone.StartRecording();
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private long ResetRecognitionCore(CancellationToken cancellationToken)
+    {
+        WaveInEvent microphone;
+        lock (_sync)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _captureCancellation.ThrowIfCancellationRequested();
+            if (_microphone is null || _recognizer is null || _stopping)
+                throw new OperationCanceledException("语音已停止。", cancellationToken);
+            microphone = _microphone;
+            _stopping = true;
+            _recognitionGeneration++;
+        }
+
+        // Stream.Reset alone leaves old PCM queued on WaveIn. Replace the capture
+        // instance so every queued callback from the previous sender is rejected.
+        microphone.StopRecording();
+        lock (_sync)
+        {
+            microphone.DataAvailable -= OnAudio;
+            microphone.RecordingStopped -= OnRecordingStopped;
+            microphone.Dispose(); // Keep the old handle reachable if disposal fails.
+            _microphone = null;
+            // Once replacement begins, finish it while microphone consent remains.
+            // Cancelling only a playback must not strand the listener without capture;
+            // its caller arbitrates the receiving mode after this fresh generation.
+            _captureCancellation.ThrowIfCancellationRequested();
+            _stream?.Dispose();
+            _stream = _recognizer!.CreateStream();
+            _partialText = string.Empty;
+            _utteranceStartedAt = null;
+            _stopping = false;
+            StartMicrophone(_captureCancellation);
+            return _recognitionGeneration;
+        }
     }
 
     private void OnAudio(object? sender, WaveInEventArgs eventArgs)
     {
         string? changedText = null;
         VoiceUtterance? completed = null;
+        long recognitionGeneration;
         lock (_sync)
         {
-            if (_stream is null || _recognizer is null || _stopping)
+            if (_stream is null || _recognizer is null || _stopping
+                || _captureCancellation.IsCancellationRequested || !ReferenceEquals(sender, _microphone))
             {
                 return;
             }
 
+            recognitionGeneration = _recognitionGeneration;
             var samples = new float[eventArgs.BytesRecorded / 2];
             for (var index = 0; index < samples.Length; index++)
             {
@@ -221,51 +297,57 @@ public sealed class OfflineContinuousVoiceListener : IContinuousVoiceListener
                 _utteranceStartedAt = null;
                 if (!string.IsNullOrWhiteSpace(finalText))
                 {
-                    completed = new VoiceUtterance(finalText, duration);
+                    completed = new VoiceUtterance(finalText, duration, recognitionGeneration);
                 }
             }
         }
 
-        if (changedText is not null)
+        lock (_sync)
         {
-            PartialTextChanged?.Invoke(this, changedText);
-            if (!string.IsNullOrWhiteSpace(changedText))
+            // Bind publication to the exact capture instance. A buffered callback from an old
+            // microphone must never become a command after the user stops and restarts voice.
+            if (_stopping || _captureCancellation.IsCancellationRequested || !ReferenceEquals(sender, _microphone)
+                || recognitionGeneration != _recognitionGeneration) return;
+            if (changedText is not null)
             {
-                RaiseState(ContinuousVoiceState.HearingSpeech, "正在听你说话");
+                PartialTextChanged?.Invoke(this, new VoicePartialText(changedText, recognitionGeneration));
+                if (!string.IsNullOrWhiteSpace(changedText))
+                {
+                    RaiseState(ContinuousVoiceState.HearingSpeech, "正在听你说话");
+                }
             }
-        }
 
-        if (completed is not null)
-        {
-            UtteranceRecognized?.Invoke(this, completed);
-            RaiseState(ContinuousVoiceState.Listening, "正在聆听");
+            if (completed is not null)
+            {
+                UtteranceRecognized?.Invoke(this, completed);
+                RaiseState(ContinuousVoiceState.Listening, "正在聆听");
+            }
         }
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs eventArgs)
     {
-        if (eventArgs.Exception is null || _stopping)
-        {
-            return;
-        }
-
         lock (_sync)
         {
+            if (eventArgs.Exception is null || _stopping || !ReferenceEquals(sender, _microphone)) return;
             DisposeCapture();
+            RaiseState(ContinuousVoiceState.Faulted, "麦克风连接已中断，重新打开元枢后会再次连接。");
         }
-
-        RaiseState(ContinuousVoiceState.Faulted, "麦克风连接已中断，重新打开元枢后会再次连接。");
     }
 
     private void DisposeCapture()
     {
+        _recognitionGeneration++;
         var microphone = _microphone;
-        _microphone = null;
         if (microphone is not null)
         {
+            _stopping = true;
             microphone.DataAvailable -= OnAudio;
             microphone.RecordingStopped -= OnRecordingStopped;
             microphone.Dispose();
+            // Keep the handle reachable if native disposal throws so a subsequent Stop can
+            // retry cleanup; never report an empty capture while a failed handle was discarded.
+            _microphone = null;
         }
 
         _stream?.Dispose();

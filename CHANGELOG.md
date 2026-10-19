@@ -2,6 +2,14 @@
 
 本项目从 V0.2.1 起采用可追溯版本记录。更早内容以历史报告和 Git 历史为准。
 
+## 未正式发布：0.8.0 合并候选
+
+- 元枢与超级灵动岛统一为一个源码仓库、桌面入口、托盘和安装包；组件源码位于 `src/Yuanshu.Island`。
+- 统一构建脚本从锁定依赖构建 Client、Host 和 Island，保留原数据、配置与各项授权边界。
+- 包含 R10 的语音播报、待命唤醒及记事本身份交接修复；已验证范围和限制见 [真实使用验收](docs/UNIFIED_PRODUCT_REAL_USAGE.md)。
+- GitHub 当前源码入口统一为 `JasonYang-GJ/yuansu`；旧私有仓库保留迁移说明和历史，见 [仓库合并说明](docs/GITHUB_REPOSITORY_MERGE.md)。
+- 本节记录开发候选，不新增正式冻结标签或签名安装包发行。
+
 ## 0.6.0 - 2026-08-30（V2 阶段 4：Final Freeze）
 
 > S4-R1/R2/R3/R4 均已 `INTEGRATED_PASS`，V0.6.0 / Stage 4 已完成 Final Freeze。正式标签 `v0.6.0-stage4` 指向 C0 `3a591a7b6af7da7d97e07093d4c33a3f44553b82`，annotated tag object 为 `20045c7960c182a052a5e0b2552ce0ed14a3863f`；本 C1 只记录冻结证据，不改变标签或二进制身份，也不代表已获对外分发批准。

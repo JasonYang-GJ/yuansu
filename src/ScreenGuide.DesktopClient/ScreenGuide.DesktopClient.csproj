@@ -27,6 +27,9 @@
     <Resource Include="..\..\assets\branding\yuanshu-icon.ico">
       <Link>Assets\yuanshu-icon.ico</Link>
     </Resource>
+    <Resource Include="..\..\assets\branding\yuanshu-icon.png">
+      <Link>Assets\yuanshu-icon.png</Link>
+    </Resource>
   </ItemGroup>
 
 </Project>

@@ -212,6 +212,8 @@ public sealed class DesktopApiDispatcher(
                         cancellationToken).ConfigureAwait(false)),
                 DesktopApiMethods.BridgeHandshake =>
                     DesktopProtocolJson.ToElement(bridge.Handshake(request.Payload)),
+                DesktopApiMethods.BridgeCancel =>
+                    DesktopProtocolJson.ToElement(await bridge.CancelAsync(request.Payload, cancellationToken).ConfigureAwait(false)),
                 DesktopApiMethods.BridgeSnapshotGet =>
                     DesktopProtocolJson.ToElement(await bridge.GetSnapshotAsync(
                         request.Payload,
@@ -1153,6 +1155,8 @@ internal static class DesktopApiErrors
                 (windowIdentityException.Code, windowIdentityException.Message),
             DesktopSearchException searchException =>
                 (searchException.Code, searchException.Message),
+            ApplicationSearchWorkflowException workflowException =>
+                (workflowException.Code, workflowException.Message),
             SessionProjectionException projectionException =>
                 (projectionException.Code, projectionException.Message),
             MemoryServiceException memoryException =>

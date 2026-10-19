@@ -15,6 +15,7 @@ public static class WindowsDesktopCapabilities
     public const string OpenWebsiteInApplication = "browser.open.visible-in-app";
     public const string OpenFile = "file.open";
     public const string SearchForeground = "desktop.search.submit";
+    public const string ApplicationSearchWorkflow = "desktop.application.search";
     public const string DescribeForeground = "desktop.window.describe";
 }
 
@@ -31,7 +32,8 @@ public sealed record WindowsDesktopActionInput(
     string? WindowTitle = null,
     string? Argument = null,
     ForegroundWindowSnapshot? WindowIdentity = null,
-    string? ApplicationTargetBinding = null);
+    string? ApplicationTargetBinding = null,
+    ApplicationSearchWorkflow? ApplicationSearch = null);
 
 public sealed record VisibleDesktopLaunchResult(
     int? ProcessId,
@@ -51,6 +53,15 @@ public interface IDesktopProcessLauncher
         ArgumentNullException.ThrowIfNull(application);
         cancellationToken.ThrowIfCancellationRequested();
         return OpenApplicationVisible(application.LaunchTarget);
+    }
+
+    VisibleDesktopLaunchResult OpenApplicationVisible(
+        KnownDesktopApplication application, CancellationToken cancellationToken, Action launchInitiated)
+    {
+        var opened = OpenApplicationVisible(application, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        launchInitiated();
+        return opened;
     }
 
     VisibleDesktopLaunchResult OpenWebsiteVisible(
@@ -108,6 +119,11 @@ public sealed class DesktopProcessLauncher : IDesktopProcessLauncher
             _activationRuntime,
             _windowDiscoveryTimeout,
             cancellationToken);
+
+    public VisibleDesktopLaunchResult OpenApplicationVisible(
+        KnownDesktopApplication application, CancellationToken cancellationToken, Action launchInitiated) =>
+        TrustedApplicationActivation.Open(application, _activationRuntime, _windowDiscoveryTimeout,
+            cancellationToken, launchInitiated);
 }
 
 public static class SafeWebsitePolicy
@@ -144,7 +160,8 @@ public static class SafeWebsitePolicy
 public sealed class WindowsDesktopSkillAdapter(
     IDesktopProcessLauncher launcher,
     IInstalledApplicationCatalog applications,
-    IReliableDesktopAutomation automation) : ISkillAdapter
+    IReliableDesktopAutomation automation,
+    IApplicationSearchWorkflowAutomation? applicationSearch = null) : ISkillAdapter
 {
     private readonly ConcurrentDictionary<Guid, RunState> _runs = new();
 
@@ -161,13 +178,14 @@ public sealed class WindowsDesktopSkillAdapter(
             WindowsDesktopCapabilities.OpenWebsiteInApplication,
             WindowsDesktopCapabilities.OpenFile,
             WindowsDesktopCapabilities.SearchForeground,
+            WindowsDesktopCapabilities.ApplicationSearchWorkflow,
             WindowsDesktopCapabilities.DescribeForeground
         });
 
     public IReadOnlyList<KnownDesktopApplication> Applications =>
         applications.GetApplications();
 
-    public Task<SkillStartResult> StartAsync(
+    public async Task<SkillStartResult> StartAsync(
         SkillInvocationRequest request,
         CancellationToken cancellationToken = default)
     {
@@ -182,7 +200,31 @@ public sealed class WindowsDesktopSkillAdapter(
         var input = JsonSerializer.Deserialize<WindowsDesktopActionInput>(request.InputJson)
             ?? throw new InvalidDataException("桌面操作内容无效。");
         var now = DateTimeOffset.UtcNow;
-        var (processId, message) = Execute(request.Capability, input, cancellationToken);
+        int? processId;
+        string message;
+        string? dataJson = null;
+        if (request.Capability == WindowsDesktopCapabilities.ApplicationSearchWorkflow)
+        {
+            if (input.ActionKind != "SearchApplication" || input.ApplicationSearch is not { } workflow
+                || input.Target != workflow.ApplicationId || input.Argument != workflow.Query
+                || applicationSearch is null || applications.FindById(input.Target) is not { } application
+                || !InstalledApplicationCatalog.TargetBindingMatches(application, input.ApplicationTargetBinding)
+                || !InstalledApplicationCatalog.IsAllowedLaunchTarget(application))
+                throw new UnauthorizedAccessException("应用搜索流程缺少一致的目标和授权参数。");
+            workflow.Validate();
+            var result = await applicationSearch.ExecuteAsync(application, input.ApplicationTargetBinding!, workflow, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!result.ApplicationVerified || !result.QuerySubmitted || !result.ResultsVerified
+                || workflow.LatestMusicArtist is not null && result.LatestMusic is null
+                || workflow.FollowUp != ApplicationSearchFollowUp.None && (result.NoResults || !result.FollowUpInvoked || !result.FollowUpVerified)
+                || workflow.FollowUp == ApplicationSearchFollowUp.None && (result.FollowUpInvoked || result.FollowUpVerified))
+                throw new ApplicationSearchWorkflowException("application_search_incomplete", "搜索流程没有完成全部必要验证，不能标记为成功。");
+            processId = null;
+            message = result.Summary;
+            dataJson = JsonSerializer.Serialize(result);
+        }
+        else (processId, message) = Execute(request.Capability, input, cancellationToken);
         var run = new SkillRunReference(request.TaskId, request.InvocationId, null, request.AttemptId);
         _runs[request.InvocationId] = new RunState(
             run,
@@ -190,13 +232,14 @@ public sealed class WindowsDesktopSkillAdapter(
             now,
             processId,
             message,
-            SkillExecutionStatus.Succeeded);
-        return Task.FromResult(new SkillStartResult(
+            SkillExecutionStatus.Succeeded,
+            dataJson);
+        return new SkillStartResult(
             run,
             SkillExecutionStatus.Succeeded,
             now,
             Descriptor.Version,
-            processId));
+            processId);
     }
 
     public Task<SkillStatusSnapshot> GetStatusAsync(
@@ -281,7 +324,8 @@ public sealed class WindowsDesktopSkillAdapter(
             run,
             state.Status == SkillExecutionStatus.Succeeded,
             state.CompletedAtUtc,
-            state.Message));
+            state.Message,
+            DataJson: state.DataJson));
     }
 
     private (int? ProcessId, string Message) Execute(
@@ -388,7 +432,7 @@ public sealed class WindowsDesktopSkillAdapter(
             }
 
             var query = DesktopSearchQuery.NormalizeAndValidate(input.Target);
-            var result = automation.Search(input.WindowIdentity, query);
+            var result = automation.Search(input.WindowIdentity, query, cancellationToken);
             return (null, result.Summary);
         }
 
@@ -415,5 +459,6 @@ public sealed class WindowsDesktopSkillAdapter(
         DateTimeOffset CompletedAtUtc,
         int? ProcessId,
         string Message,
-        SkillExecutionStatus Status);
+        SkillExecutionStatus Status,
+        string? DataJson = null);
 }

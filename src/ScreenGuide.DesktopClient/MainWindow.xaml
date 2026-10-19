@@ -59,6 +59,8 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="18" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="18" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock x:Name="PageTitleText" Text="首页" FontFamily="Segoe UI Variable Display"
                                FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" />
@@ -66,6 +68,9 @@
                             VerticalAlignment="Center">
                         <TextBlock x:Name="HostStatusText" Text="本机中枢连接中" Foreground="{StaticResource SuccessBrush}" FontSize="12" />
                     </Border>
+                    <Button x:Name="ReturnToAssistantButton" Grid.Column="5" Content="返回悬浮球" Visibility="Collapsed"
+                            VerticalAlignment="Center" Click="ReturnToAssistantButton_Click"
+                            AutomationProperties.AutomationId="ReturnToAssistant" />
                     <Border x:Name="CodexStatusPill" Grid.Column="3" Visibility="Collapsed" Background="#EDF2FA" CornerRadius="12" Padding="10,5"
                             VerticalAlignment="Center">
                         <TextBlock x:Name="CodexStatusText" Text="Codex 检查中" Foreground="{StaticResource BrandBrush}" FontSize="12" />
@@ -115,11 +120,19 @@
                                                 Background="#1F8A6A" HorizontalAlignment="Center" VerticalAlignment="Center" />
                                     </Border>
                                     <StackPanel Grid.Column="2" VerticalAlignment="Center">
-                                        <TextBlock x:Name="VoiceStateText" Text="正在启动语音中枢"
-                                                   FontFamily="Segoe UI Variable Display" FontSize="27" FontWeight="SemiBold" />
+                                        <TextBlock x:Name="VoiceStateText" Text="语音未开启"
+                                                   FontFamily="Segoe UI Variable Display" FontSize="27" FontWeight="SemiBold"
+                                                   TextWrapping="Wrap" AutomationProperties.AutomationId="VoiceState" />
                                         <TextBlock x:Name="VoicePrivacyText"
-                                                   Text="元枢打开后会自动聆听。直接说出指令，不需要点击、打字或按键。"
-                                                   Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" />
+                                                   Text="点击“开始语音”后使用麦克风在本机识别。停止语音或关闭窗口即结束，也可在对话页打字。"
+                                                   Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                            <Button x:Name="StartVoiceButton" Content="开始语音" Style="{StaticResource PrimaryButton}"
+                                                    Click="StartVoiceButton_Click" AutomationProperties.AutomationId="StartVoice" />
+                                            <Button x:Name="StopVoiceButton" Content="停止语音" Margin="10,0,0,0" IsEnabled="False"
+                                                    Style="{StaticResource SecondaryButton}" Click="StopVoiceButton_Click"
+                                                    AutomationProperties.AutomationId="StopVoice" />
+                                        </StackPanel>
                                     </StackPanel>
                                 </Grid>
 
@@ -127,7 +140,7 @@
                                         Background="#F8FCFB" BorderBrush="#C9DED9" BorderThickness="1" CornerRadius="5">
                                     <StackPanel>
                                         <TextBlock Text="最近听到" Style="{StaticResource Eyebrow}" />
-                                        <TextBlock x:Name="VoiceTranscriptText" Text="等待你说话…" Margin="0,5,0,0"
+                                        <TextBlock x:Name="VoiceTranscriptText" Text="开启语音后，可以直接说出指令。" Margin="0,5,0,0"
                                                    FontSize="16" TextWrapping="Wrap" Foreground="#52656D" />
                                     </StackPanel>
                                 </Border>
@@ -944,14 +957,16 @@
                                            AutomationProperties.AutomationId="AiProviderHealthStatus" />
                             </StackPanel>
                         </Border>
-                        <Border Style="{StaticResource SurfaceBorder}" Padding="20" Margin="0,0,0,12"
+                        <Border x:Name="LocalMemorySection" Style="{StaticResource SurfaceBorder}" Padding="20" Margin="0,0,0,12"
                                 AutomationProperties.AutomationId="LocalMemorySection">
                             <StackPanel>
-                                <TextBlock Text="长期记忆（阶段 3）" FontSize="16" FontWeight="SemiBold" />
+                                <TextBlock Text="我的记忆" FontSize="16" FontWeight="SemiBold" />
                                 <TextBlock Text="仅保存在本机；当前不会自动发送给模型。"
                                            Foreground="{StaticResource MutedBrush}" Margin="0,5,0,14"
                                            TextWrapping="Wrap"
                                            AutomationProperties.AutomationId="MemoryLocalOnlyNotice" />
+                                <TextBlock Text="点击“新增记忆”写下希望记住的内容，再点击保存。下面可按关键词查找；聊天时可在对话页选择本次要参考的记忆。"
+                                           Foreground="{StaticResource MutedBrush}" Margin="0,0,0,14" TextWrapping="Wrap" />
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="0.9*" />
@@ -1114,7 +1129,7 @@
                                 <TextBlock x:Name="SettingsCodexStatusText" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" />
                                 <TextBlock Grid.Row="2" Text="编程工具版本" VerticalAlignment="Center" />
                                 <TextBlock x:Name="SettingsCodexVersionText" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center" FontFamily="Consolas" />
-                                <TextBlock Grid.Row="3" Text="自动语音监听" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="3" Text="语音状态" VerticalAlignment="Center" />
                                 <TextBlock x:Name="SettingsVoiceStatusText" Grid.Row="3" Grid.Column="1" VerticalAlignment="Center" />
                                 <TextBlock Grid.Row="4" Text="数据库状态" VerticalAlignment="Center" />
                                 <TextBlock x:Name="SettingsDatabaseStatusText" Grid.Row="4" Grid.Column="1" VerticalAlignment="Center" />

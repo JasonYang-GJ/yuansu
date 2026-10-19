@@ -914,7 +914,6 @@ public sealed class Stage2AiSettingsUiAutomationTests
         var resultLine = Assert.Single(outputLines);
         Assert.StartsWith(VoiceHarnessResultPrefix, resultLine, StringComparison.Ordinal);
         Assert.True(string.IsNullOrWhiteSpace(error), "Voice Harness 不应向标准错误输出内容。");
-        Assert.Equal(0, process.ExitCode);
 
         var result = JsonSerializer.Deserialize<VoiceHarnessResult>(
             resultLine[VoiceHarnessResultPrefix.Length..],
@@ -924,6 +923,8 @@ public sealed class Stage2AiSettingsUiAutomationTests
                     System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow
             });
         Assert.NotNull(result);
+        Assert.True(process.ExitCode == 0,
+            $"Voice Harness failed: {result.ErrorCode} ({result.ExceptionType}).");
         Assert.Equal("completed", result.Stage);
         Assert.Equal("Cancelled", result.OldTurnState);
         Assert.Equal("Completed", result.NewTurnState);
@@ -945,6 +946,12 @@ public sealed class Stage2AiSettingsUiAutomationTests
         Assert.True(result.UiShowedNewReply);
         Assert.True(result.UiRejectedLateReply);
         Assert.True(result.NaturalShutdown);
+        Assert.NotNull(result.Orb);
+        Assert.True(result.Orb.PausedOrbWithoutListening);
+        Assert.True(result.Orb.ToggleStartsOnce);
+        Assert.True(result.Orb.ManagementCloseKeepsListening);
+        Assert.True(result.Orb.RepeatedSurfaceDoesNotRestart);
+        Assert.True(result.Orb.ExitStopsMicrophone);
         Assert.InRange(result.ElapsedMilliseconds, 1, 90_000);
         Assert.Null(result.ErrorCode);
         Assert.Null(result.ExceptionType);
@@ -1170,7 +1177,7 @@ public sealed class Stage2AiSettingsUiAutomationTests
                     $"DesktopClient 已退出，退出码 {process.ExitCode}；{ReadStartupError(dataRoot)}");
             }
 
-            var window = FindTopLevelWindow(process.Id, "元枢");
+            var window = FindTopLevelWindow(process.Id, "元枢 · 管理");
             if (window != IntPtr.Zero)
             {
                 return window;
@@ -1979,7 +1986,15 @@ public sealed class Stage2AiSettingsUiAutomationTests
         bool NaturalShutdown,
         long ElapsedMilliseconds,
         string? ErrorCode,
-        string? ExceptionType);
+        string? ExceptionType,
+        OrbHarnessEvidence? Orb);
+
+    private sealed record OrbHarnessEvidence(
+        bool PausedOrbWithoutListening,
+        bool ToggleStartsOnce,
+        bool ManagementCloseKeepsListening,
+        bool RepeatedSurfaceDoesNotRestart,
+        bool ExitStopsMicrophone);
 
     private sealed class RecordingChatProvider : IChatModelProvider
     {

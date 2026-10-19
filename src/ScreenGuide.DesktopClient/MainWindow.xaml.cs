@@ -25,7 +25,11 @@ public partial class MainWindow : Window
     private readonly TrayIconService _tray;
     private readonly DesktopNotificationCoordinator _notifications;
     private readonly IContinuousVoiceListener _voice;
-    private readonly WindowsSpeechOutput _speechOutput = new();
+    private readonly VoiceSessionController _voiceSession;
+    private readonly Func<string, CancellationToken, Task> _speakAsync;
+    private readonly VoiceReplyGate _voiceReplies = new();
+    private Guid _voiceSubmissionNoticeOwner;
+    private Guid? _automaticSpeechRequest;
     private readonly DispatcherTimer _refreshTimer;
     private readonly CancellationTokenSource _lifetime = new();
     private IReadOnlyList<ProjectDto> _projects = [];
@@ -49,7 +53,13 @@ public partial class MainWindow : Window
     private bool _forceClose;
     private bool _voiceCommandBusy;
     private VoiceUtterance? _queuedVoiceUtterance;
+    private long? _queuedVoiceGeneration;
     private CancellationTokenSource? _activeVoiceCommandCancellation;
+    private IInputRegistrationBoundary? _latestInputRegistration;
+    private (string? InstanceId, DateTimeOffset? StartedAtUtc) _registrationCoordinator;
+    private long _replacementInputVersion;
+    private CancellationTokenSource _replacementInputCancellation = new();
+    private const string PendingVoiceCancellationMessage = "正在取消上一条请求；收到回执后才能确认停止。";
     private CancellationTokenSource? _speechCancellation;
     private string? _activeSpeechText;
     private string? _lastAssistantSpeechText;
@@ -58,6 +68,7 @@ public partial class MainWindow : Window
     private DateTimeOffset _lastVoiceUtteranceAt;
     private DesktopClientSettings _settings;
     private AiSettingsDto? _aiSettings;
+    private Task? _initializationTask;
 
     public MainWindow(
         IDesktopApiClient api,
@@ -66,7 +77,8 @@ public partial class MainWindow : Window
         WindowsStartupService? startupService = null,
         TrayIconService? tray = null,
         DesktopClientSettings? settings = null,
-        IContinuousVoiceListener? voice = null)
+        IContinuousVoiceListener? voice = null,
+        Func<string, CancellationToken, Task>? speechOutput = null)
     {
         InitializeComponent();
         _api = api;
@@ -76,9 +88,11 @@ public partial class MainWindow : Window
         _tray = tray ?? new TrayIconService();
         _settings = settings ?? new DesktopClientSettings();
         _voice = voice ?? new OfflineContinuousVoiceListener();
+        _speakAsync = speechOutput ?? new WindowsSpeechOutput().SpeakAsync;
+        _voiceSession = new VoiceSessionController(_voice);
         _voice.PartialTextChanged += Voice_PartialTextChanged;
         _voice.UtteranceRecognized += Voice_UtteranceRecognized;
-        _voice.StateChanged += Voice_StateChanged;
+        _voiceSession.StateChanged += VoiceSession_StateChanged;
         _notifications = new DesktopNotificationCoordinator(_tray, _settingsStore);
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -91,29 +105,36 @@ public partial class MainWindow : Window
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        => await InitializeClientAsync();
+
+    public Task InitializeClientAsync() => _initializationTask ??= InitializeClientCoreAsync();
+
+    private async Task InitializeClientCoreAsync()
     {
         ProductVersionText.Text = $"版本 {Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.2.0"}";
         RenderVoiceStatus();
         await RefreshAllAsync(showErrors: true);
+        if (_forceClose || _lifetime.IsCancellationRequested) return;
         _sessionUpdateLoop = RunSessionUpdateLoopAsync();
-        await StartContinuousVoiceAsync();
         _refreshTimer.Start();
     }
 
     private async void MainWindow_Closed(object? sender, EventArgs e)
     {
+        _assistantWindow?.CloseForExit();
+        CancelPendingVoiceInput();
         CancelPendingPointerGesture();
         _pointerGesture.Dispose();
         _refreshTimer.Stop();
         _activeVoiceCommandCancellation?.Cancel();
         _activeVoiceCommandCancellation?.Dispose();
-        _speechCancellation?.Cancel();
-        _speechCancellation?.Dispose();
         _lifetime.Cancel();
         _voice.PartialTextChanged -= Voice_PartialTextChanged;
         _voice.UtteranceRecognized -= Voice_UtteranceRecognized;
-        _voice.StateChanged -= Voice_StateChanged;
-        await _voice.DisposeAsync();
+        _voiceSession.StateChanged -= VoiceSession_StateChanged;
+        await _voiceSession.DisposeAsync();
+        await CloseIslandSurfaceAsync();
+        await Task.Run(async () => await _voice.DisposeAsync());
         if (_sessionUpdateLoop is not null)
         {
             try
@@ -129,6 +150,15 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
+        if ((_assistantWindow is not null || _islandBridge is { IsVisible: true }) && !_forceClose)
+        {
+            // Closing the management surface returns to the still-visible assistant.
+            e.Cancel = true;
+            ShowAssistantSurface();
+            return;
+        }
+        CancelPendingVoiceInput();
+        _ = _voiceSession.StopAsync();
         CancelPendingPointerGesture();
         if (!_pointerCancellationCompletion.IsCompletedSuccessfully)
         {
@@ -140,20 +170,21 @@ public partial class MainWindow : Window
         }
         if (_forceClose)
         {
-            _ = _voice.StopAsync();
+            _ = _voiceSession.StopAsync();
             return;
         }
 
         if (_settings.RunInBackground && _settings.CloseToTray)
         {
             e.Cancel = true;
+            _ = _voiceSession.StopAsync();
             Hide();
             StatusBarText.Text = "元枢正在后台运行。";
             return;
         }
 
         _forceClose = true;
-        _ = _voice.StopAsync();
+        _ = _voiceSession.StopAsync();
         _ = Dispatcher.BeginInvoke(() => System.Windows.Application.Current.Shutdown());
     }
 
@@ -338,7 +369,23 @@ public partial class MainWindow : Window
 
         snapshot = _sessionProjectionCache.Snapshot ?? snapshot;
 
+        if (_currentSession is { } previous && snapshot is not null
+            && (previous.SessionId != snapshot.SessionId
+                || previous.CoordinatorInstanceId != snapshot.CoordinatorInstanceId
+                || previous.CoordinatorStartedAtUtc != snapshot.CoordinatorStartedAtUtc))
+        {
+            var hostChanged = previous.CoordinatorInstanceId != snapshot.CoordinatorInstanceId
+                || previous.CoordinatorStartedAtUtc != snapshot.CoordinatorStartedAtUtc;
+            CancelPendingVoiceInput(invalidateOperation: hostChanged, preserveQueuedInput: !hostChanged);
+        }
         _currentSession = snapshot;
+        ReconcileInputCancellation(snapshot);
+        if (_automaticSpeechRequest is { } speakingRequest
+            && !_voiceReplies.IsCurrent(speakingRequest, snapshot, _voiceSession.ListeningGeneration))
+        {
+            _speechCancellation?.Cancel();
+            _automaticSpeechRequest = null;
+        }
         if (_pointerGesture.IsArmed && _pointerGestureStillValid?.Invoke() != true) CancelPendingPointerGesture();
         _selectedConversationId = snapshot?.ConversationId;
         RenderConversationMemoryChoices();
@@ -386,6 +433,7 @@ public partial class MainWindow : Window
         }
 
         var lastTurn = snapshot?.Turns.OrderBy(item => item.SequenceNumber).LastOrDefault();
+        RefreshVoiceCancellationStatus();
         AssistantResultBorder.Visibility = presentation.ShowResult && lastTurn is not null
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -431,6 +479,9 @@ public partial class MainWindow : Window
             SessionMessagesList.ScrollIntoView(messages[^1]);
             ConversationMessagesList.ScrollIntoView(messages[^1]);
         }
+        var reply = _voiceReplies.TryTakeReply(snapshot, _voiceSession.ListeningGeneration);
+        if (reply is not null) _ = SpeakAssistantAsync(reply.Text, reply.RequestId);
+        RenderAssistantSurface();
     }
 
     private async Task RunSessionUpdateLoopAsync()
@@ -494,9 +545,7 @@ public partial class MainWindow : Window
         SettingsHostStatusText.Text = _systemStatus.HostOnline ? "在线" : "离线";
         SettingsCodexStatusText.Text = _systemStatus.Codex.Message;
         SettingsCodexVersionText.Text = _systemStatus.Codex.Version ?? "未检测到";
-        SettingsVoiceStatusText.Text = _voice.IsListening
-            ? "自动监听已开启；音频只在本机内存中识别。"
-            : _voice.GetCapabilityReport().Message;
+        SettingsVoiceStatusText.Text = _voiceSession.Status.Message;
         SettingsDatabaseStatusText.Text = _systemStatus.DatabaseStatus == "Ready" ? "正常" : _systemStatus.DatabaseStatus;
         SettingsDeviceIdText.Text = _systemStatus.DeviceId;
         SettingsDataPathText.Text = _systemStatus.DataDirectory;
@@ -825,10 +874,10 @@ public partial class MainWindow : Window
         _ => "尚未检查"
     };
 
-    private async Task LoadTaskDetailsAsync(Guid taskId, bool navigate)
+    private async Task LoadTaskDetailsAsync(Guid taskId, bool navigate, Func<bool>? isCurrent = null)
     {
         var details = await _api.GetTaskAsync(taskId, _lifetime.Token);
-        if (details is null)
+        if (details is null || isCurrent?.Invoke() == false)
         {
             return;
         }
@@ -913,6 +962,8 @@ public partial class MainWindow : Window
 
     private async Task CreateTaskAsync(ProjectDto? project, string instruction, string? title)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         if (project is null)
         {
@@ -928,45 +979,57 @@ public partial class MainWindow : Window
 
         await RunCommandAsync(async () =>
         {
-            var session = await _api.StartNewSessionAsync(
+            if (!await AwaitPendingVoiceSubmissionAsync(operation, allowRegistrationHandoff: true)) return;
+            var session = await StartSessionForOperationAsync(operation,
                 string.IsNullOrWhiteSpace(title) ? "编程任务" : title.Trim(),
                 _lifetime.Token);
-            var submitted = await _api.SubmitSessionInputAsync(
+            if (!TryAdoptCreatedSession(ref operation, session)) return;
+            if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+            var submitted = await SubmitInputForOperationAsync(operation,
                 new SessionInputRequestDto(
                     instruction.Trim(),
                     "ProgrammingTask",
                     $"desktop-programming-{Guid.NewGuid():N}",
                     session.SessionId),
                 _lifetime.Token);
-            _ = await WaitForSessionTurnPhaseAsync(
-                submitted.TurnId,
-                "WaitingForProject");
-            var selected = await _api.ProvideSessionProjectAsync(
-                session.SessionId,
-                submitted.TurnId,
-                project.Id,
-                _lifetime.Token);
-            var selectedTurn = selected.Turns.Single(turn => turn.Id == submitted.TurnId);
-            if (selectedTurn.Phase != "WaitingForConfirmation")
+            try
             {
-                throw new InvalidOperationException("编程任务没有进入确认状态，请稍后重试。 ");
-            }
+                if (!IsInputOperationCurrent(operation)) return;
+                _ = await WaitForSessionTurnPhaseAsync(operation, submitted.TurnId, "WaitingForProject");
+                if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+                var selected = await _api.ProvideSessionProjectAsync(
+                    session.SessionId,
+                    submitted.TurnId,
+                    project.Id,
+                    _lifetime.Token);
+                if (!IsInputOperationCurrent(operation)) return;
+                var selectedTurn = selected.Turns.Single(turn => turn.Id == submitted.TurnId);
+                if (selectedTurn.Phase != "WaitingForConfirmation")
+                {
+                    throw new InvalidOperationException("编程任务没有进入确认状态，请稍后重试。 ");
+                }
 
-            var started = await _api.ConfirmSessionTurnAsync(
-                session.SessionId,
-                submitted.TurnId,
-                confirmed: true,
-                _lifetime.Token);
-            RenderSession(started);
-            var taskId = started.Turns.Single(turn => turn.Id == submitted.TurnId).TaskId
-                         ?? throw new InvalidOperationException("编程任务没有成功建立。 ");
-            _selectedTaskId = taskId;
-            await LoadTaskDetailsAsync(taskId, navigate: true);
-            await RefreshAllAsync(showErrors: false);
-        });
+                if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+                var started = await _api.ConfirmSessionTurnAsync(
+                    session.SessionId,
+                    submitted.TurnId,
+                    confirmed: true,
+                    _lifetime.Token);
+                if (!IsInputOperationCurrent(operation)) return;
+                RenderSession(started);
+                var taskId = started.Turns.Single(turn => turn.Id == submitted.TurnId).TaskId
+                             ?? throw new InvalidOperationException("编程任务没有成功建立。 ");
+                _selectedTaskId = taskId;
+                await LoadTaskDetailsAsync(taskId, navigate: true, isCurrent: () => IsInputOperationCurrent(operation));
+                if (!IsInputOperationCurrent(operation)) return;
+                await RefreshAllAsync(showErrors: false);
+            }
+            finally { await CancelSupersededTurnAsync(operation, submitted); }
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async Task<SessionSnapshotDto> WaitForSessionTurnPhaseAsync(
+        InputOperation operation,
         Guid turnId,
         params string[] expectedPhases)
     {
@@ -974,7 +1037,13 @@ public partial class MainWindow : Window
         SessionSnapshotDto? snapshot = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            snapshot ??= await _api.GetCurrentSessionAsync(_lifetime.Token);
+            if (!IsInputOperationCurrent(operation)) throw new OperationCanceledException();
+            snapshot ??= await _api.GetCurrentSessionAsync(_lifetime.Token).WaitAsync(operation.Cancellation);
+            if (!IsInputOperationCurrent(operation)) throw new OperationCanceledException();
+            if (snapshot is not null && (snapshot.SessionId != operation.Session?.SessionId
+                || snapshot.CoordinatorInstanceId != operation.Session?.CoordinatorInstanceId
+                || snapshot.CoordinatorStartedAtUtc != operation.Session?.CoordinatorStartedAtUtc))
+                throw new InvalidOperationException("话题已经变化，这次操作没有继续。 ");
             var turn = snapshot?.Turns.SingleOrDefault(item => item.Id == turnId);
             if (turn is not null && expectedPhases.Contains(turn.Phase, StringComparer.Ordinal))
             {
@@ -990,7 +1059,7 @@ public partial class MainWindow : Window
             snapshot = await _api.WaitForSessionUpdateAsync(
                 snapshot?.ChangeVersion ?? -1,
                 2_000,
-                _lifetime.Token);
+                _lifetime.Token).WaitAsync(operation.Cancellation);
         }
 
         throw new TimeoutException("等待统一会话建立编程任务超时。 ");
@@ -998,13 +1067,14 @@ public partial class MainWindow : Window
 
     private async Task RunCommandAsync(
         Func<Task> operation,
-        CancellationToken operationToken = default)
+        CancellationToken operationToken = default,
+        Func<bool>? isCurrent = null)
     {
         try
         {
             Mouse.OverrideCursor = Cursors.Wait;
-            await operation();
             ErrorBanner.Visibility = Visibility.Collapsed;
+            await operation();
         }
         catch (OperationCanceledException) when (
             _lifetime.IsCancellationRequested || operationToken.IsCancellationRequested)
@@ -1012,6 +1082,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
+            if (isCurrent?.Invoke() == false) return;
             var error = UserFacingErrorMapper.Map(exception);
             ShowError($"{error.Message} {error.SuggestedAction}", exception);
         }
@@ -1023,19 +1094,47 @@ public partial class MainWindow : Window
 
     private async Task SubmitVoiceCommandAsync(
         string text,
-        CancellationToken cancellationToken)
+        long? listeningGeneration,
+        CancellationToken cancellationToken,
+        InputOperation operation)
     {
         CancelPendingPointerGesture();
+        var replyRequest = _voiceReplies.BeginInput(_currentSession, listeningGeneration,
+            operation.CoordinatorInstanceId, operation.CoordinatorStartedAtUtc);
+        var noticeOwner = _voiceSubmissionNoticeOwner = Guid.NewGuid();
+        var submissionContext = _currentSession;
         await RunCommandAsync(async () =>
         {
-            var submitted = await _api.SubmitSessionInputAsync(
-                new SessionInputRequestDto(
+            using var submission = new RevocableVoiceSubmission(
+                receiptToken => _api.SubmitSessionInputAsync(new SessionInputRequestDto(
                     text,
                     "Voice",
                     $"desktop-voice-{Guid.NewGuid():N}",
-                    _currentSession?.SessionId),
-                cancellationToken);
+                    submissionContext?.SessionId), receiptToken),
+                (receipt, stopToken) => _api.CancelSessionTurnAsync(receipt.SessionId, receipt.TurnId, stopToken),
+                cancellationToken,
+                _lifetime.Token,
+                (receipt, exception) => Dispatcher.BeginInvoke(() =>
+                {
+                    var current = _currentSession;
+                    if (_forceClose || _lifetime.IsCancellationRequested || noticeOwner != _voiceSubmissionNoticeOwner
+                        || current is null || submissionContext is null
+                        || current.SessionId != submissionContext.SessionId
+                        || current.CoordinatorInstanceId != submissionContext.CoordinatorInstanceId
+                        || current.CoordinatorStartedAtUtc != submissionContext.CoordinatorStartedAtUtc
+                        || (_voiceSession.ListeningGeneration is { } activeGeneration && activeGeneration != listeningGeneration)) return;
+                    // Never attach an old submission's error to a newer Turn or topic.
+                    var expectedTurn = receipt?.TurnId ?? submissionContext.Turns.LastOrDefault()?.Id;
+                    if (current.Turns.LastOrDefault()?.Id != expectedTurn) return;
+                    ShowError("已停止接收这条语音，但尚未确认上一条请求已停止。请查看当前任务并重试停止。", exception);
+                }),
+                confirmed: _ => Dispatcher.BeginInvoke(new Action(RefreshVoiceCancellationStatus)));
+            SetInputRegistration(submission, operation);
+            var submitted = await submission.WaitAsync();
             cancellationToken.ThrowIfCancellationRequested();
+            if (!IsInputOperationCurrent(operation, requireSameSession: submissionContext is not null)
+                || _voiceSession.ListeningGeneration != listeningGeneration) return;
+            _voiceReplies.AttachTurn(replyRequest, submitted);
             StatusBarText.Text = submitted.WasDuplicate
                 ? "这条请求已经收到，正在继续处理。"
                 : "已交给当前话题处理。";
@@ -1045,6 +1144,8 @@ public partial class MainWindow : Window
 
     private async void ConfirmAssistantPlanButton_Click(object sender, RoutedEventArgs e)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         var session = _currentSession;
         var turn = session?.ForegroundTurn;
         if (session is null || turn is null)
@@ -1054,11 +1155,13 @@ public partial class MainWindow : Window
 
         await RunCommandAsync(async () =>
         {
+            if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+            if (_currentSession?.SessionId != session.SessionId || _currentSession.ForegroundTurn?.Id != turn.Id) return;
             SessionSnapshotDto snapshot = turn.Phase switch
             {
                 "WaitingForProject" when SessionProjectComboBox.SelectedItem is ProjectDto project =>
                     await _api.ProvideSessionProjectAsync(session.SessionId, turn.Id, project.Id, _lifetime.Token),
-                "WaitingForFile" => await ChooseAndProvideSessionFileAsync(session, turn),
+                "WaitingForFile" => await ChooseAndProvideSessionFileAsync(session, turn, operation),
                 "WaitingForWindow" => await _api.RetrySessionTurnAsync(
                     session.SessionId,
                     turn.Id,
@@ -1075,13 +1178,19 @@ public partial class MainWindow : Window
                     _lifetime.Token),
                 _ => throw new InvalidOperationException("这条请求当前不需要补充或确认。 ")
             };
+            if (!IsInputOperationCurrent(operation))
+            {
+                await CancelSupersededTurnAsync(operation, new(session.SessionId, turn.Id, false));
+                return;
+            }
             RenderSession(snapshot);
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async Task<SessionSnapshotDto> ChooseAndProvideSessionFileAsync(
         SessionSnapshotDto session,
-        UnifiedSessionTurnDto turn)
+        UnifiedSessionTurnDto turn,
+        InputOperation operation)
     {
         var dialog = new OpenFileDialog
         {
@@ -1093,6 +1202,10 @@ public partial class MainWindow : Window
         {
             return session;
         }
+
+        if (!await AwaitPendingVoiceSubmissionAsync(operation)
+            || _currentSession?.SessionId != session.SessionId || _currentSession.ForegroundTurn?.Id != turn.Id)
+            return _currentSession ?? session;
 
         return await _api.ProvideSessionFileAsync(
             session.SessionId,
@@ -1108,6 +1221,8 @@ public partial class MainWindow : Window
 
     private async void CancelAssistantPlanButton_Click(object sender, RoutedEventArgs e)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         var session = _currentSession;
         var turn = session?.ForegroundTurn;
         if (session is null || turn is null)
@@ -1127,9 +1242,10 @@ public partial class MainWindow : Window
                     session.SessionId,
                     turn.Id,
                     _lifetime.Token);
+            if (!IsInputOperationCurrent(operation)) return;
             RenderSession(snapshot);
             StatusBarText.Text = "已取消，不会继续执行。";
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void StopSessionButton_Click(object sender, RoutedEventArgs e) =>
@@ -1137,6 +1253,8 @@ public partial class MainWindow : Window
 
     private async Task CancelCurrentSessionTurnAsync()
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         var session = _currentSession;
         var turn = session?.ForegroundTurn;
@@ -1152,68 +1270,94 @@ public partial class MainWindow : Window
                 session.SessionId,
                 turn.Id,
                 _lifetime.Token);
+            if (!IsInputOperationCurrent(operation)) return;
             RenderSession(snapshot);
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void NewTopicButton_Click(object sender, RoutedEventArgs e)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         await RunCommandAsync(async () =>
         {
-            var snapshot = await _api.StartNewSessionAsync(
+            if (!await AwaitPendingVoiceSubmissionAsync(operation, allowRegistrationHandoff: true)) return;
+            var snapshot = await StartSessionForOperationAsync(operation,
                 "新话题",
                 _lifetime.Token);
-            RenderSession(snapshot);
+            if (!TryAdoptCreatedSession(ref operation, snapshot)) return;
             VoiceTranscriptText.Text = "等待你说话…";
             StatusBarText.Text = "已经开始一个新话题。";
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
-    private async Task StartContinuousVoiceAsync()
+    private async void StartVoiceButton_Click(object sender, RoutedEventArgs e)
     {
-        var report = _voice.GetCapabilityReport();
-        if (!report.RecognitionModelAvailable || report.MicrophoneCount == 0)
-        {
-            RenderVoiceStatus();
-            return;
-        }
-
-        try
-        {
-            await Task.Run(() => _voice.StartAsync(_lifetime.Token), _lifetime.Token);
-        }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
-        {
-        }
-        catch (Exception exception)
-        {
-            RenderVoiceState(
-                ContinuousVoiceState.Faulted,
-                UserFacingErrorMapper.Map(exception).Message);
-        }
+        VoiceTranscriptText.Text = "等待你说话…";
+        await _voiceSession.StartAsync(_lifetime.Token);
     }
 
-    private void Voice_PartialTextChanged(object? sender, string text) =>
+    private async void StopVoiceButton_Click(object sender, RoutedEventArgs e)
+    {
+        CancelPendingVoiceInput();
+        await _voiceSession.StopAsync();
+    }
+
+    private void Voice_PartialTextChanged(object? sender, VoicePartialText partial)
+    {
+        var generation = _voiceSession.ListeningGeneration;
+        if (generation is null) return;
         Dispatcher.BeginInvoke(() =>
         {
-            if (_voice.IsListening && !string.IsNullOrWhiteSpace(text))
+            if (_voiceSession.ListeningGeneration == generation
+                && _voiceReception.AcceptsPartial(generation, partial.RecognitionGeneration)
+                && !string.IsNullOrWhiteSpace(partial.Text))
             {
+                var echo = IsAssistantSpeechEcho(partial.Text);
+                var preview = echo ? new VoiceSegmentPreview(partial.Text, false)
+                    : _voiceSegments.ObservePartial(partial.Text, generation.Value, partial.RecognitionGeneration);
+                var text = preview.Text;
                 VoiceTranscriptText.Text = text;
-                if (SpeechEchoMatcher.CanInterrupt(text) && !IsAssistantSpeechEcho(text))
+                if (SpeechEchoMatcher.CanInterrupt(partial.Text) && !echo && !preview.ContinuesPhrase)
                 {
-                    _speechCancellation?.Cancel();
-                    _activeVoiceCommandCancellation?.Cancel();
+                    // A partial can still grow into a connected search clause. Keep only
+                    // its short recognition prefix until the final disambiguates it.
+                    CancelPendingVoiceInput(preserveVoiceSegments: true);
                     VoiceStateText.Text = "听到你插话，正在停止上一条";
                 }
+                PresentIslandPartial(text);
             }
         });
+    }
 
-    private void Voice_UtteranceRecognized(object? sender, VoiceUtterance utterance) =>
-        Dispatcher.BeginInvoke(() => QueueVoiceUtterance(utterance));
+    private void Voice_UtteranceRecognized(object? sender, VoiceUtterance utterance)
+    {
+        var generation = _voiceSession.ListeningGeneration;
+        if (generation is null) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_voiceSession.ListeningGeneration != generation || IsAssistantSpeechEcho(utterance.Text)) return;
+            switch (_voiceReception.Classify(utterance.Text, generation, utterance.RecognitionGeneration))
+            {
+                case VoiceReceptionDecision.Submit:
+                    QueueVoiceUtterance(utterance with { Text = _voiceSegments.AcceptFinal(
+                        utterance.Text, generation.Value, utterance.RecognitionGeneration) });
+                    break;
+                case VoiceReceptionDecision.Rest: _ = ChangeLocalReceptionAsync(standby: true); break;
+                case VoiceReceptionDecision.Wake:
+                    // ASR may spell the same sound as 元书/袁叔. Check the canonical
+                    // wake phrase too so that a spoken explanation cannot wake itself.
+                    if (!IsAssistantSpeechEcho(VoiceReceptionGate.CanonicalWakePhrase(utterance.Text)!))
+                        _ = ChangeLocalReceptionAsync(standby: false);
+                    break;
+            }
+        });
+    }
 
     private void QueueVoiceUtterance(VoiceUtterance utterance)
     {
+        if (!_voiceSession.IsListening) return;
         var text = utterance.Text.Trim();
         if (text.Length == 0 || IsAssistantSpeechEcho(text))
         {
@@ -1229,13 +1373,16 @@ public partial class MainWindow : Window
 
         _lastVoiceUtterance = text;
         _lastVoiceUtteranceAt = now;
+        InvalidateInputOperation();
         VoiceTranscriptText.Text = text;
         AssistantPlanBorder.Visibility = Visibility.Collapsed;
         AssistantResultBorder.Visibility = Visibility.Collapsed;
         ErrorBanner.Visibility = Visibility.Collapsed;
         _queuedVoiceUtterance = utterance with { Text = text };
-        _speechCancellation?.Cancel();
+        _queuedVoiceGeneration = _voiceSession.ListeningGeneration;
+        CancelVoiceFeedback();
         _activeVoiceCommandCancellation?.Cancel();
+        PresentIslandFinal(text);
         if (_voiceCommandBusy)
         {
             VoiceStateText.Text = "已收到新指令，正在停止上一条";
@@ -1251,21 +1398,38 @@ public partial class MainWindow : Window
         _voiceCommandBusy = true;
         try
         {
-            while (_queuedVoiceUtterance is { } utterance)
+            while (_queuedVoiceUtterance is not null)
             {
+                var operation = CaptureInputOperation();
+                if (!await AwaitPendingVoiceSubmissionAsync(operation, allowRegistrationHandoff: true))
+                {
+                    if (operation.Version == _replacementInputVersion)
+                    {
+                        _queuedVoiceUtterance = null;
+                        _queuedVoiceGeneration = null;
+                    }
+                    continue;
+                }
+                if (_queuedVoiceUtterance is not { } utterance) continue;
+                var generation = _queuedVoiceGeneration;
                 _queuedVoiceUtterance = null;
+                if (generation is null || generation != _voiceSession.ListeningGeneration) continue;
                 _activeVoiceCommandCancellation?.Dispose();
                 _activeVoiceCommandCancellation =
                     CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
                 var cancellationToken = _activeVoiceCommandCancellation.Token;
                 try
                 {
-                    RenderVoiceState(ContinuousVoiceState.HearingSpeech, "已听懂，正在处理");
+                    await AwaitIslandFinalPresentationAsync(operation, cancellationToken);
+                    VoiceStateText.Text = "已听懂，正在处理";
                     StatusBarText.Text = $"已听到：{utterance.Text}";
-                    await SubmitVoiceCommandAsync(utterance.Text, cancellationToken);
+                    _islandPhaseOverride = null;
+                    RenderIslandSurface();
+                    await SubmitVoiceCommandAsync(utterance.Text, generation, cancellationToken, operation);
                 }
                 catch (OperationCanceledException) when (
-                    cancellationToken.IsCancellationRequested
+                    (cancellationToken.IsCancellationRequested || operation.Cancellation.IsCancellationRequested
+                     || !IsInputOperationCurrent(operation))
                     && !_lifetime.IsCancellationRequested)
                 {
                     StatusBarText.Text = _queuedVoiceUtterance is null
@@ -1279,10 +1443,7 @@ public partial class MainWindow : Window
             _activeVoiceCommandCancellation?.Dispose();
             _activeVoiceCommandCancellation = null;
             _voiceCommandBusy = false;
-            if (_voice.IsListening)
-            {
-                RenderVoiceState(ContinuousVoiceState.Listening, "正在聆听");
-            }
+            RenderVoiceStatus();
         }
     }
 
@@ -1299,45 +1460,48 @@ public partial class MainWindow : Window
                && SpeechEchoMatcher.IsLikelyAssistantEcho(text, reference);
     }
 
-    private void Voice_StateChanged(object? sender, ContinuousVoiceStatus status) =>
-        Dispatcher.BeginInvoke(() => RenderVoiceState(status.State, status.Message));
-
-    private void RenderVoiceState(ContinuousVoiceState state, string message)
-    {
-        VoiceStateText.Text = message;
-        DashboardCodexVersionText.Text = state switch
+    private void VoiceSession_StateChanged(object? sender, VoiceSessionStatus status) =>
+        Dispatcher.BeginInvoke(() =>
         {
-            ContinuousVoiceState.Listening => "自动聆听中",
-            ContinuousVoiceState.HearingSpeech => "正在识别",
-            ContinuousVoiceState.Faulted => "需要检查",
-            _ => "未启动"
-        };
-        var color = state switch
-        {
-            ContinuousVoiceState.Listening => "#1F8A6A",
-            ContinuousVoiceState.HearingSpeech => "#2E6DD8",
-            ContinuousVoiceState.Faulted => "#C94C4C",
-            _ => "#A56210"
-        };
-        VoiceStateDot.Background = BrushFrom(color);
-        DashboardCodexVersionText.Foreground = BrushFrom(color);
-    }
+            SynchronizeVoiceReception();
+            if (_voiceSession.ListeningGeneration is null) CancelVoiceFeedback();
+            RenderVoiceStatus();
+        });
 
     private void RenderVoiceStatus()
     {
-        var report = _voice.GetCapabilityReport();
-        if (report.RecognitionModelAvailable && report.MicrophoneCount > 0)
+        var status = _voiceSession.Status;
+        VoiceStateText.Text = status.Message;
+        if (_voiceSession.IsListening)
+            VoiceStateText.Text = _voiceReception.Mode switch
+            {
+                VoiceReceptionMode.Standby => "本地待命 · 说“元枢”唤醒",
+                VoiceReceptionMode.Transitioning => _receptionTransitionText,
+                _ => status.Message
+            };
+        StartVoiceButton.IsEnabled = status.CanStart;
+        StartVoiceButton.Content = status.State == VoiceSessionState.Faulted ? "重试语音" : "开始语音";
+        StopVoiceButton.IsEnabled = status.CanStop;
+        SettingsVoiceStatusText.Text = VoiceStateText.Text;
+        DashboardCodexVersionText.Text = status.State switch
         {
-            RenderVoiceState(
-                _voice.IsListening ? ContinuousVoiceState.Listening : ContinuousVoiceState.Stopped,
-                _voice.IsListening ? "正在聆听" : "正在启动语音中枢");
-            return;
-        }
-
-        RenderVoiceState(
-            ContinuousVoiceState.Faulted,
-            report.RecognitionModelAvailable ? "没有检测到麦克风" : "需要安装本地语音模型");
-        VoicePrivacyText.Text = report.Message;
+            VoiceSessionState.Listening => "正在聆听",
+            VoiceSessionState.HearingSpeech => "正在识别",
+            VoiceSessionState.Starting => "正在启动",
+            VoiceSessionState.Stopping => "正在停止",
+            VoiceSessionState.Faulted or VoiceSessionState.CleanupFailed => "需要检查",
+            _ => "未启动"
+        };
+        var color = status.State switch
+        {
+            VoiceSessionState.Listening => "#1F8A6A",
+            VoiceSessionState.HearingSpeech => "#2E6DD8",
+            VoiceSessionState.Faulted or VoiceSessionState.CleanupFailed => "#C94C4C",
+            _ => "#A56210"
+        };
+        VoiceStateDot.Background = BrushFrom(color);
+        RenderAssistantSurface();
+        DashboardCodexVersionText.Foreground = BrushFrom(color);
     }
 
     private async void ReadAssistantResultButton_Click(object sender, RoutedEventArgs e)
@@ -1348,31 +1512,285 @@ public partial class MainWindow : Window
             return;
         }
 
-        await RunCommandAsync(async () =>
+        CancelVoiceFeedback();
+        await SpeakAssistantAsync(text);
+    }
+
+    private void CancelVoiceFeedback()
+    {
+        _voiceReplies.Invalidate();
+        _speechCancellation?.Cancel();
+    }
+
+    private void CancelPendingVoiceInput(bool invalidateOperation = true, bool preserveQueuedInput = false,
+        bool preserveVoiceSegments = false)
+    {
+        if (!preserveVoiceSegments) _voiceSegments.Reset();
+        if (invalidateOperation)
         {
-            ReadAssistantResultButton.IsEnabled = false;
-            _speechCancellation?.Cancel();
-            _speechCancellation?.Dispose();
-            _speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-            _activeSpeechText = text;
+            _islandPhaseOverride = null;
+            CancelReceptionTransition();
+            InvalidateInputOperation();
+        }
+        if (!preserveQueuedInput)
+        {
+            _queuedVoiceUtterance = null;
+            _queuedVoiceGeneration = null;
+        }
+        _activeVoiceCommandCancellation?.Cancel();
+        if (_latestInputRegistration?.IsRegistrationBoundaryPending == true)
+            StatusBarText.Text = PendingVoiceCancellationMessage;
+        CancelVoiceFeedback();
+    }
+
+    private sealed class InputOperation(long version, SessionSnapshotDto? session, CancellationToken cancellation)
+    {
+        public long Version { get; } = version;
+        public CancellationToken Cancellation { get; } = cancellation;
+        public SessionSnapshotDto? Session { get; set; } = session;
+        // A clean profile has no Session yet. Capture the coordinator independently
+        // before its first write, so its own first Session is not a Host restart.
+        public string? CoordinatorInstanceId { get; set; } = session?.CoordinatorInstanceId;
+        public DateTimeOffset? CoordinatorStartedAtUtc { get; set; } = session?.CoordinatorStartedAtUtc;
+    }
+
+    private async Task<SessionSnapshotDto> StartSessionForOperationAsync(
+        InputOperation operation, string title, CancellationToken cancellationToken)
+    {
+        using var input = CancellationTokenSource.CreateLinkedTokenSource(operation.Cancellation, cancellationToken);
+        IInputRegistrationBoundary? registration = null;
+        using var submission = new RevocableInputSubmission<SessionSnapshotDto>(
+            receiptToken => _api.StartNewSessionAsync(title, receiptToken),
+            // Creating a topic does not itself execute work. Its acknowledgement is
+            // still required before any newer write may register at the Host.
+            (_, _) => Task.CompletedTask,
+            input.Token, _lifetime.Token,
+            confirmed: _ => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (ReferenceEquals(_latestInputRegistration, registration)
+                    && StatusBarText.Text == PendingVoiceCancellationMessage)
+                    StatusBarText.Text = "已停止后续操作，话题登记已完成。";
+            })));
+        registration = submission;
+        SetInputRegistration(submission, operation);
+        _voiceSubmissionNoticeOwner = Guid.NewGuid();
+        return await submission.WaitAsync();
+    }
+
+    private async Task<SessionTurnCommandResultDto> SubmitInputForOperationAsync(
+        InputOperation operation, SessionInputRequestDto request, CancellationToken cancellationToken)
+    {
+        using var input = CancellationTokenSource.CreateLinkedTokenSource(operation.Cancellation, cancellationToken);
+        IInputRegistrationBoundary? registration = null;
+        using var submission = new RevocableInputSubmission<SessionTurnCommandResultDto>(
+            receiptToken => _api.SubmitSessionInputAsync(request, receiptToken),
+            (receipt, stopToken) => _api.CancelSessionTurnAsync(receipt.SessionId, receipt.TurnId, stopToken),
+            input.Token, _lifetime.Token,
+            confirmed: receipt => Dispatcher.BeginInvoke(new Action(() =>
+                RefreshInputCancellationStatus(registration, receipt))));
+        registration = submission;
+        SetInputRegistration(submission, operation);
+        _voiceSubmissionNoticeOwner = Guid.NewGuid();
+        return await submission.WaitAsync();
+    }
+
+    private void InvalidateInputOperation()
+    {
+        _replacementInputVersion++;
+        var previous = _replacementInputCancellation;
+        _replacementInputCancellation = new CancellationTokenSource();
+        previous.Cancel();
+        previous.Dispose();
+    }
+
+    private void SetInputRegistration(IInputRegistrationBoundary registration, InputOperation operation)
+    {
+        _latestInputRegistration = registration;
+        _registrationCoordinator = (operation.CoordinatorInstanceId, operation.CoordinatorStartedAtUtc);
+    }
+
+    private void ReconcileInputCancellation(SessionSnapshotDto? snapshot)
+    {
+        // A retry of Stop (or a later trusted projection) can confirm a cancellation
+        // whose original RPC reply was lost. Reconcile only the exact Host and receipt.
+        if (snapshot is null || _latestInputRegistration is not { } registration
+            || _registrationCoordinator.InstanceId != snapshot.CoordinatorInstanceId
+            || _registrationCoordinator.StartedAtUtc != snapshot.CoordinatorStartedAtUtc
+            || registration.RegistrationReceipt is not SessionTurnCommandResultDto receipt
+            || receipt.SessionId != snapshot.SessionId
+            || snapshot.Turns.SingleOrDefault(turn => turn.Id == receipt.TurnId)?.Phase != "Cancelled") return;
+        registration.AcknowledgeCancellation(receipt);
+    }
+
+    private InputOperation CaptureInputOperation() =>
+        new(_replacementInputVersion, _currentSession, _replacementInputCancellation.Token);
+
+    private bool IsInputOperationCurrent(InputOperation operation, bool requireSameSession = true) =>
+        operation.Version == _replacementInputVersion && !_forceClose && !_lifetime.IsCancellationRequested
+        && (_currentSession is null || (operation.CoordinatorInstanceId == _currentSession.CoordinatorInstanceId
+            && operation.CoordinatorStartedAtUtc == _currentSession.CoordinatorStartedAtUtc))
+        && (!requireSameSession || operation.Session?.SessionId == _currentSession?.SessionId);
+
+    private bool TryAdoptCreatedSession(ref InputOperation operation, SessionSnapshotDto created)
+    {
+        // A poll may have already projected our own newly created Session. Only this
+        // exact reply can advance the captured operation; never adopt a newer input.
+        if (!IsInputOperationCurrent(operation, requireSameSession: false)
+            || created.CoordinatorInstanceId != operation.CoordinatorInstanceId
+            || created.CoordinatorStartedAtUtc != operation.CoordinatorStartedAtUtc
+            || (_currentSession?.SessionId != operation.Session?.SessionId && _currentSession?.SessionId != created.SessionId))
+            return false;
+        operation.Session = created;
+        RenderSession(created);
+        return IsInputOperationCurrent(operation);
+    }
+
+    private async Task CancelSupersededTurnAsync(InputOperation operation, SessionTurnCommandResultDto receipt, bool force = false)
+    {
+        if (!force && IsInputOperationCurrent(operation)) return;
+        // Cancellation is scoped to this receipt, never the current/newer Turn.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try { await _api.CancelSessionTurnAsync(receipt.SessionId, receipt.TurnId, deadline.Token).WaitAsync(deadline.Token); }
+        catch (Exception exception)
+        {
+            // The Host remains the source of truth: never report cancellation as
+            // successful and never attach this stale error to a newer input.
+            Trace.TraceWarning("Superseded input cancellation was not confirmed ({0}).", exception.GetType().Name);
+        }
+    }
+
+    private async Task<bool> AwaitPendingVoiceSubmissionAsync(InputOperation operation, bool allowRegistrationHandoff = false)
+    {
+        if (!IsInputOperationCurrent(operation, requireSameSession: !allowRegistrationHandoff)) return false;
+        if (operation.CoordinatorInstanceId is null)
+        {
+            var identity = await _api.WaitForSessionProjectionAsync(new SessionProjectionCursorDto(
+                "", DateTimeOffset.MinValue, Guid.Empty, -1, 0, 0), _lifetime.Token);
+            if (operation.Version != _replacementInputVersion || _forceClose || _lifetime.IsCancellationRequested) return false;
+            operation.CoordinatorInstanceId = identity.CoordinatorInstanceId;
+            operation.CoordinatorStartedAtUtc = identity.CoordinatorStartedAtUtc;
+            if (!IsInputOperationCurrent(operation, requireSameSession: !allowRegistrationHandoff)) return false;
+        }
+        var pending = _latestInputRegistration;
+        if (pending is not null)
+        {
             try
             {
-                await _speechOutput.SpeakAsync(text, _speechCancellation.Token);
+                // Shared by voice, text, New Topic and selected actions. Waiting only in
+                // the voice queue lets an older RPC register after a newer UI request.
+                await pending.WaitForRegistrationBoundaryAsync();
             }
-            catch (OperationCanceledException) when (_speechCancellation.IsCancellationRequested)
+            catch (Exception exception)
             {
-                StatusBarText.Text = "已听到你插话，元枢已停止朗读。";
+                if (pending.WasDispatched && !pending.HasConfirmedCancellation)
+                {
+                    if (IsInputOperationCurrent(operation))
+                        ShowError("上一条请求尚未确认停止，这次新操作没有提交。请查看当前任务并重试停止。", exception);
+                    return false;
+                }
             }
-            finally
+        }
+        if (allowRegistrationHandoff && pending?.RegistrationReceipt is { } receipt
+            && IsInputOperationCurrent(operation, requireSameSession: false))
+        {
+            // A superseded creation may register its Session while the user's newer
+            // New Topic waits. Accept only that acknowledged Session as an intermediate
+            // binding; the newer operation still retains its original input generation.
+            var priorSessionId = receipt switch
+            {
+                SessionSnapshotDto created => created.SessionId,
+                SessionTurnCommandResultDto submitted => submitted.SessionId,
+                _ => (Guid?)null
+            };
+            if (priorSessionId != operation.Session?.SessionId)
+            {
+                var registered = await _api.GetCurrentSessionAsync(_lifetime.Token);
+                if (registered is null) return false;
+                if (registered.SessionId == priorSessionId)
+                {
+                    if (!TryAdoptCreatedSession(ref operation, registered)) return false;
+                }
+                else if (registered.SessionId != operation.Session?.SessionId) return false;
+            }
+        }
+        // Stop, a newer input, a new topic or a Host change wins while this request waits.
+        return IsInputOperationCurrent(operation);
+    }
+
+    private void RefreshVoiceCancellationStatus()
+    {
+        if (_latestInputRegistration is { HasConfirmedCancellation: true, RegistrationReceipt: SessionTurnCommandResultDto receipt })
+            RefreshInputCancellationStatus(_latestInputRegistration, receipt);
+    }
+
+    private void RefreshInputCancellationStatus(IInputRegistrationBoundary? registration, SessionTurnCommandResultDto receipt)
+    {
+        if (_forceClose || _lifetime.IsCancellationRequested || StatusBarText.Text != PendingVoiceCancellationMessage
+            || !ReferenceEquals(_latestInputRegistration, registration)
+            || _currentSession is not { } session || session.SessionId != receipt.SessionId) return;
+        var latest = session.Turns.OrderBy(item => item.SequenceNumber).LastOrDefault();
+        if (latest?.Id == receipt.TurnId && latest.Phase == "Cancelled")
+            StatusBarText.Text = "上一条请求已取消。";
+    }
+
+    private async Task SpeakAssistantAsync(string text, Guid? automaticRequest = null, bool localReceptionReply = false)
+    {
+        if (automaticRequest is { } request
+            && !_voiceReplies.IsCurrent(request, _currentSession, _voiceSession.ListeningGeneration)) return;
+        _speechCancellation?.Cancel();
+        var speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _speechCancellation = speechCancellation;
+        _automaticSpeechRequest = automaticRequest;
+        ReadAssistantResultButton.IsEnabled = false;
+        _activeSpeechText = text;
+        var receptionMode = _voiceReception.Mode == VoiceReceptionMode.Standby
+            ? VoiceReceptionMode.Standby : VoiceReceptionMode.Direct;
+        RenderAssistantSurface();
+        try
+        {
+            if (!localReceptionReply) await ResetSpeechReceptionAsync(speechCancellation, receptionMode);
+            speechCancellation.Token.ThrowIfCancellationRequested();
+            await _speakAsync(text, speechCancellation.Token);
+        }
+        catch (OperationCanceledException) when (speechCancellation.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            if (ReferenceEquals(_speechCancellation, speechCancellation)
+                && !speechCancellation.IsCancellationRequested)
+                ShowError("文字回复已完成，但语音播放失败，请检查电脑声音输出后点击“朗读结果”。", exception);
+        }
+        finally
+        {
+            if (!localReceptionReply && ReferenceEquals(_speechCancellation, speechCancellation)
+                && !speechCancellation.IsCancellationRequested)
+            {
+                try { await ResetSpeechReceptionAsync(speechCancellation, receptionMode); }
+                catch (OperationCanceledException) { }
+                catch (Exception exception)
+                {
+                    // ResetSpeechReceptionAsync already arbitrates stopping by its
+                    // transition ownership. A late fault must not stop a new microphone
+                    // session or overwrite the new playback's status after this await.
+                    if (ReferenceEquals(_speechCancellation, speechCancellation)
+                        && !speechCancellation.IsCancellationRequested
+                        && _voiceSession.ListeningGeneration is null)
+                        ShowError("语音接收未能安全恢复，麦克风已停止，请重新开始语音。", exception);
+                }
+            }
+            // A cancelled older playback may finish after a new one. It owns only its own
+            // cancellation source and must never clear or dispose the current playback.
+            if (ReferenceEquals(_speechCancellation, speechCancellation))
             {
                 _lastAssistantSpeechText = text;
                 _lastAssistantSpeechEndedAt = DateTimeOffset.UtcNow;
                 _activeSpeechText = null;
-                _speechCancellation.Dispose();
                 _speechCancellation = null;
+                _automaticSpeechRequest = null;
                 ReadAssistantResultButton.IsEnabled = true;
             }
-        });
+            speechCancellation.Dispose();
+            RenderVoiceStatus();
+        }
     }
 
     private async void NewTaskSubmitButton_Click(object sender, RoutedEventArgs e)
@@ -1480,12 +1898,16 @@ public partial class MainWindow : Window
         }
 
         var answer = DecisionAnswerTextBox.Text;
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         await RunCommandAsync(async () =>
         {
+            if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
             await _api.ContinueTaskAsync(taskId, answer, cancellationToken: _lifetime.Token);
+            if (!IsInputOperationCurrent(operation)) return;
             DecisionAnswerTextBox.Clear();
-            await LoadTaskDetailsAsync(taskId, navigate: false);
-        });
+            await LoadTaskDetailsAsync(taskId, navigate: false, isCurrent: () => IsInputOperationCurrent(operation));
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void ClearHistoryButton_Click(object sender, RoutedEventArgs e)
@@ -1533,14 +1955,17 @@ public partial class MainWindow : Window
 
     private async void NewConversationButton_Click(object sender, RoutedEventArgs e)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         await RunCommandAsync(async () =>
         {
-            var session = await _api.StartNewSessionAsync("新话题", _lifetime.Token);
+            if (!await AwaitPendingVoiceSubmissionAsync(operation, allowRegistrationHandoff: true)) return;
+            var session = await StartSessionForOperationAsync(operation, "新话题", _lifetime.Token);
+            if (!TryAdoptCreatedSession(ref operation, session)) return;
             ConversationInputTextBox.Clear();
-            RenderSession(session);
             ConversationInputTextBox.Focus();
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private void ConversationListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1549,6 +1974,8 @@ public partial class MainWindow : Window
 
     private async void SendConversationButton_Click(object sender, RoutedEventArgs e)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         var session = _currentSession;
         if (session is null)
@@ -1566,6 +1993,7 @@ public partial class MainWindow : Window
 
         await RunCommandAsync(async () =>
         {
+            if (!await AwaitPendingVoiceSubmissionAsync(operation, allowRegistrationHandoff: true)) return;
             var memoryItems = ConversationMemorySelectionList.SelectedItems
                 .OfType<MemoryRow>()
                 .Select(row => new MemoryOutboundItemReferenceDto(row.Item.Id, row.Item.Version))
@@ -1575,14 +2003,19 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException("每个 Turn 最多只能选择 8 条长期记忆。");
             }
 
-            await _api.SubmitSessionInputAsync(
+            var submitted = await SubmitInputForOperationAsync(operation,
                 new SessionInputRequestDto(
                     message,
                     "Text",
                     $"desktop-chat-{Guid.NewGuid():N}",
-                    session.SessionId,
+                    operation.Session!.SessionId,
                     MemoryItems: memoryItems),
                 _lifetime.Token);
+            if (!IsInputOperationCurrent(operation))
+            {
+                await CancelSupersededTurnAsync(operation, submitted);
+                return;
+            }
             _isRenderingMemoryConsent = true;
             try
             {
@@ -1595,7 +2028,7 @@ public partial class MainWindow : Window
             }
 
             await RefreshSessionAsync();
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void ConfirmMemoryOutboundButton_Click(object sender, RoutedEventArgs e) =>
@@ -1606,6 +2039,8 @@ public partial class MainWindow : Window
 
     private async void AskPointerQuestionButton_Click(object sender, RoutedEventArgs e)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         var session = _currentSession;
         var question = ConversationInputTextBox.Text.Trim();
@@ -1624,16 +2059,20 @@ public partial class MainWindow : Window
                 "确认本机区域读取", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
             return;
 
-        await RunCommandAsync(() =>
+        await RunCommandAsync(async () =>
         {
+            if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
             ArmPointerGesture(DateTimeOffset.UtcNow.AddSeconds(30),
                 "请在 30 秒内切到目标应用，把指针放到要问的位置，按 Ctrl+Alt+F8。现在尚未读取屏幕。",
                 () => _currentSession?.SessionId == session.SessionId
+                    && IsInputOperationCurrent(operation)
                     && _currentSession?.ForegroundTurn?.Id == session.ForegroundTurn?.Id
                     && ConversationInputTextBox.Text.Trim() == question
                     && ConversationMemorySelectionList.SelectedItems.Count == 0,
                 async token =>
                 {
+                    if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+                    token.ThrowIfCancellationRequested();
                     var anchor = await _api.PreparePointerRegionAsync(new PreparePointerRegionRequestDto(true), token);
                     await _pointerRequestCancellation.BindAsync(
                         cancellation => _api.CancelPointerRegionAsync(anchor.AnchorId, cancellation), token);
@@ -1641,13 +2080,20 @@ public partial class MainWindow : Window
                     try
                     {
                         token.ThrowIfCancellationRequested();
-                        var result = await _api.SubmitSessionInputAsync(new SessionInputRequestDto(
+                        if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+                        token.ThrowIfCancellationRequested();
+                        var result = await SubmitInputForOperationAsync(operation, new SessionInputRequestDto(
                             question, "Text", $"desktop-pointer-answer-{Guid.NewGuid():N}",
                             session.SessionId, PointerAnchorId: anchor.AnchorId), token);
                         submitted = true;
                         await _pointerRequestCancellation.BindAsync(
                             cancellation => _api.CancelSessionTurnAsync(session.SessionId, result.TurnId, cancellation), token);
                         token.ThrowIfCancellationRequested();
+                        if (!IsInputOperationCurrent(operation))
+                        {
+                            await CancelSupersededTurnAsync(operation, result);
+                            return;
+                        }
                         _isRenderingMemoryConsent = true;
                         try { ConversationInputTextBox.Clear(); }
                         finally { _isRenderingMemoryConsent = false; }
@@ -1662,8 +2108,7 @@ public partial class MainWindow : Window
                         }
                     }
                 });
-            return Task.CompletedTask;
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void ConfirmPointerAnswerButton_Click(object sender, RoutedEventArgs e) =>
@@ -1674,6 +2119,8 @@ public partial class MainWindow : Window
 
     private async Task RespondPointerAnswerConsentAsync(bool confirmed)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture(cancelRequest: false);
         var session = _currentSession;
         var consent = session?.PointerAnswerConsents?
@@ -1684,29 +2131,43 @@ public partial class MainWindow : Window
         {
             if (!confirmed)
             {
-                RenderSession(await _api.CancelSessionTurnAsync(session.SessionId, consent.TurnId, _lifetime.Token));
+                var cancelled = await _api.CancelSessionTurnAsync(session.SessionId, consent.TurnId, _lifetime.Token);
+                if (IsInputOperationCurrent(operation)) RenderSession(cancelled);
                 return;
             }
+            if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
             ArmPointerGesture(consent.ExpiresAtUtc,
                 "已确认这份文字预览。请在预览过期前切回原目标窗口，按 Ctrl+Alt+F8 发送这一次；不会重新读取图片。",
                 () => _currentSession?.SessionId == session.SessionId
+                    && IsInputOperationCurrent(operation)
                     && _currentSession?.ForegroundTurn?.Id == consent.TurnId
                     && _currentSession?.PointerAnswerConsents?.Any(item => item.ConsentId == consent.ConsentId
                         && item.PreviewHash == consent.PreviewHash) == true,
                 async token =>
                 {
+                    if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+                    token.ThrowIfCancellationRequested();
                     await _pointerRequestCancellation.BindAsync(
                         cancellation => _api.CancelSessionTurnAsync(session.SessionId, consent.TurnId, cancellation), token);
+                    token.ThrowIfCancellationRequested();
+                    if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
                     token.ThrowIfCancellationRequested();
                     var snapshot = await _api.ConfirmPointerAnswerAsync(session.SessionId,
                         consent.TurnId, consent.ConsentId, consent.PreviewHash, true, token);
                     token.ThrowIfCancellationRequested();
+                    if (!IsInputOperationCurrent(operation))
+                    {
+                        await CancelSupersededTurnAsync(operation, new(session.SessionId, consent.TurnId, false));
+                        return;
+                    }
                     RenderSession(snapshot);
                 });
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
     private async Task RespondMemoryOutboundConsentAsync(bool confirmed)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         var session = _currentSession;
         var consent = session?.MemoryOutboundConsents?
             .SingleOrDefault(item => item.TurnId == session.ForegroundTurn?.Id);
@@ -1717,14 +2178,20 @@ public partial class MainWindow : Window
 
         await RunCommandAsync(async () =>
         {
+            if (confirmed && !await AwaitPendingVoiceSubmissionAsync(operation)) return;
             var snapshot = await _api.ConfirmMemoryOutboundAsync(
                 session.SessionId,
                 consent.TurnId,
                 consent.ConsentId,
                 confirmed,
                 _lifetime.Token);
+            if (!IsInputOperationCurrent(operation))
+            {
+                if (confirmed) await CancelSupersededTurnAsync(operation, new(session.SessionId, consent.TurnId, false));
+                return;
+            }
             RenderSession(snapshot);
-        });
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void ConversationMemorySelectionList_SelectionChanged(
@@ -1737,6 +2204,7 @@ public partial class MainWindow : Window
 
     private async void ConversationInputTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (!string.IsNullOrWhiteSpace(ConversationInputTextBox.Text)) CancelPendingVoiceInput();
         await InvalidateDisplayedMemoryConsentAsync();
         await InvalidateDisplayedPointerConsentAsync();
     }
@@ -1867,52 +2335,70 @@ public partial class MainWindow : Window
         string expectedIntentKind,
         string expectedTarget)
     {
+        CancelPendingVoiceInput();
+        var operation = CaptureInputOperation();
         CancelPendingPointerGesture();
         await RunCommandAsync(async () =>
         {
-            var submitted = await _api.SubmitSessionInputAsync(
+            if (!await AwaitPendingVoiceSubmissionAsync(operation, allowRegistrationHandoff: true)) return;
+            var submitted = await SubmitInputForOperationAsync(operation,
                 new SessionInputRequestDto(
                     commandText,
                     "Text",
                     $"desktop-ui-action-{Guid.NewGuid():N}",
-                    _currentSession?.SessionId,
+                    operation.Session?.SessionId,
                     expectedIntentKind,
                     expectedTarget),
                 _lifetime.Token);
-            var waiting = await WaitForSessionTurnPhaseAsync(
-                submitted.TurnId,
-                "WaitingForConfirmation");
-            var plannedTurn = waiting.Turns.Single(item => item.Id == submitted.TurnId);
-            if (!SessionUiPresenter.MatchesConfirmedTarget(
-                    plannedTurn,
-                    expectedIntentKind,
-                    expectedTarget))
+            try
             {
-                await _api.CancelSessionTurnAsync(
+                if (operation.Session is null)
+                {
+                    var firstSession = await _api.GetCurrentSessionAsync(_lifetime.Token);
+                    if (firstSession is null || firstSession.SessionId != submitted.SessionId
+                        || !TryAdoptCreatedSession(ref operation, firstSession))
+                    {
+                        await CancelSupersededTurnAsync(operation, submitted, force: true);
+                        return;
+                    }
+                }
+                if (!IsInputOperationCurrent(operation)) return;
+                var waiting = await WaitForSessionTurnPhaseAsync(operation, submitted.TurnId, "WaitingForConfirmation");
+                var plannedTurn = waiting.Turns.Single(item => item.Id == submitted.TurnId);
+                if (!SessionUiPresenter.MatchesConfirmedTarget(
+                        plannedTurn,
+                        expectedIntentKind,
+                        expectedTarget))
+                {
+                    await _api.CancelSessionTurnAsync(
+                        waiting.SessionId,
+                        submitted.TurnId,
+                        _lifetime.Token);
+                    throw new InvalidOperationException(
+                        "安全检查发现实际计划与刚才确认的目标不一致，因此没有执行这次操作。 ");
+                }
+
+                if (!await AwaitPendingVoiceSubmissionAsync(operation)) return;
+                var completed = await _api.ConfirmSessionTurnAsync(
                     waiting.SessionId,
                     submitted.TurnId,
+                    confirmed: true,
                     _lifetime.Token);
-                throw new InvalidOperationException(
-                    "安全检查发现实际计划与刚才确认的目标不一致，因此没有执行这次操作。 ");
+                if (!IsInputOperationCurrent(operation)) return;
+                RenderSession(completed);
+                var turn = completed.Turns.Single(item => item.Id == submitted.TurnId);
+                var succeeded = turn.Phase == "Completed";
+                var message = turn.ResultSummary
+                              ?? turn.FailureMessage
+                              ?? (succeeded ? "操作已完成。" : "这次操作没有成功。");
+                DesktopActionResultText.Text = message;
+                DesktopActionResultBorder.Background = BrushFrom(succeeded ? "#EAF6F0" : "#FCECED");
+                DesktopActionResultBorder.BorderBrush = BrushFrom(succeeded ? "#79B79C" : "#E3A1A5");
+                DesktopActionResultBorder.Visibility = Visibility.Visible;
+                StatusBarText.Text = message;
             }
-
-            var completed = await _api.ConfirmSessionTurnAsync(
-                waiting.SessionId,
-                submitted.TurnId,
-                confirmed: true,
-                _lifetime.Token);
-            RenderSession(completed);
-            var turn = completed.Turns.Single(item => item.Id == submitted.TurnId);
-            var succeeded = turn.Phase == "Completed";
-            var message = turn.ResultSummary
-                          ?? turn.FailureMessage
-                          ?? (succeeded ? "操作已完成。" : "这次操作没有成功。");
-            DesktopActionResultText.Text = message;
-            DesktopActionResultBorder.Background = BrushFrom(succeeded ? "#EAF6F0" : "#FCECED");
-            DesktopActionResultBorder.BorderBrush = BrushFrom(succeeded ? "#79B79C" : "#E3A1A5");
-            DesktopActionResultBorder.Visibility = Visibility.Visible;
-            StatusBarText.Text = message;
-        });
+            finally { await CancelSupersededTurnAsync(operation, submitted); }
+        }, isCurrent: () => IsInputOperationCurrent(operation));
     }
 
     private async void SaveSettingsButton_Click(object sender, RoutedEventArgs e)
@@ -2340,15 +2826,16 @@ public partial class MainWindow : Window
 
     public async Task ExitApplicationAsync()
     {
+        if (_forceClose) return;
         _forceClose = true;
-        try
-        {
-            await _api.ShutdownHostAsync(CancellationToken.None);
-        }
-        catch
-        {
-        }
+        CancelPendingVoiceInput();
+        CancelPendingPointerGesture();
+        _assistantWindow?.Render("正在退出", "正在关闭麦克风和本机服务…", false, false, false, false);
+        await BoundedShutdown.TryCompleteAsync(_ => _voiceSession.StopAsync(), TimeSpan.FromSeconds(5));
+        await CloseIslandSurfaceAsync();
+        await BoundedShutdown.TryCompleteAsync(token => _api.ShutdownHostAsync(token), TimeSpan.FromSeconds(5));
 
+        _assistantWindow?.CloseForExit();
         System.Windows.Application.Current.Shutdown();
     }
 
@@ -2471,6 +2958,7 @@ public partial class MainWindow : Window
     {
         if (online && !_isHostOnline)
         {
+            CancelPendingVoiceInput();
             _currentSession = null;
         }
 
@@ -2488,6 +2976,7 @@ public partial class MainWindow : Window
             ? "没有更多技术信息。"
             : UserFacingErrorMapper.Map(exception).TechnicalDetail;
         ErrorBanner.Visibility = Visibility.Visible;
+        RenderAssistantSurface();
     }
 
     private void CloseErrorButton_Click(object sender, RoutedEventArgs e) =>

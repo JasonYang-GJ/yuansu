@@ -7,3 +7,6 @@
 *.cs text eol=crlf
 *.xaml text eol=crlf
 *.csproj text eol=crlf
+
+# Stored experiment patches contain meaningful space-only context lines.
+docs/experiments/*.patch -whitespace

@@ -10,7 +10,7 @@ public sealed record CreateLocalTaskRequest(
     string WorkingDirectoryRelativePath = ".",
     string? IdempotencyKey = null);
 
-public sealed record LocalTaskCommandResult(Guid TaskId, bool WasDuplicate);
+public sealed record LocalTaskCommandResult(Guid TaskId, bool WasDuplicate, bool Accepted = true);
 
 public sealed record LocalTaskDetails(
     AgentTask Task,
@@ -304,7 +304,8 @@ public sealed class LocalTaskEntryService(
     public async Task<LocalTaskCommandResult> CancelTaskAsync(
         Guid taskId,
         string? idempotencyKey = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? expectedVersion = null)
     {
         var task = await RequireTaskAsync(taskId, cancellationToken).ConfigureAwait(false);
         var command = NewCommand(
@@ -313,13 +314,20 @@ public sealed class LocalTaskEntryService(
             task.Id,
             CommandType.CancelTask,
             idempotencyKey,
-            "{}",
+            expectedVersion is null ? "{}" : JsonSerializer.Serialize(new { expectedVersion }),
             timeProvider.GetUtcNow());
         var registration = await store.RegisterCommandAsync(command, cancellationToken)
             .ConfigureAwait(false);
         if (!registration.Accepted)
         {
-            return new LocalTaskCommandResult(taskId, true);
+            var previous = registration.Command;
+            if (previous.CommandType != CommandType.CancelTask || previous.TaskId != taskId
+                || previous.ProjectId != task.ProjectId || previous.PayloadJson != command.PayloadJson)
+            {
+                throw new InvalidOperationException("request_conflict");
+            }
+
+            return new LocalTaskCommandResult(taskId, true, previous.Status == CommandStatus.Processed);
         }
 
         try
@@ -328,14 +336,15 @@ public sealed class LocalTaskEntryService(
                 taskId,
                 command.SourceDeviceId,
                 command.Id,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                expectedVersion).ConfigureAwait(false);
             await store.CompleteCommandAsync(
                 command.Id,
                 accepted ? CommandStatus.Processed : CommandStatus.Rejected,
                 timeProvider.GetUtcNow(),
                 accepted ? null : "task_not_cancellable",
                 cancellationToken).ConfigureAwait(false);
-            return new LocalTaskCommandResult(taskId, false);
+            return new LocalTaskCommandResult(taskId, false, accepted);
         }
         catch (Exception exception)
         {

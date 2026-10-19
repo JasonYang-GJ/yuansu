@@ -59,11 +59,36 @@ public sealed class DesktopActionEntryService(
         return await ExecuteCoreAsync(request, trustedWindow, null, cancellationToken).ConfigureAwait(false);
     }
 
+    internal Task<ApplicationSearchExecution> ExecuteApplicationSearchWorkflowAsync(
+        ExecuteDesktopActionRequestDto request,
+        ApplicationSearchWorkflow workflow,
+        string expectedTargetBinding,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(workflow);
+        workflow.Validate();
+        if (request.ActionKind != "SearchApplication"
+            || !string.Equals(request.Target, workflow.ApplicationId, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(expectedTargetBinding))
+            throw new UnauthorizedAccessException("应用搜索操作与本次确认的范围不一致。");
+        return ExecuteCoreWithEvidenceAsync(
+            request, null, expectedTargetBinding, cancellationToken, workflow);
+    }
+
     private async Task<DesktopActionResultDto> ExecuteCoreAsync(
         ExecuteDesktopActionRequestDto request,
         ForegroundWindowSnapshot? trustedWindow,
         string? expectedApplicationTargetBinding,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        (await ExecuteCoreWithEvidenceAsync(request, trustedWindow,
+            expectedApplicationTargetBinding, cancellationToken).ConfigureAwait(false)).Result;
+
+    private async Task<ApplicationSearchExecution> ExecuteCoreWithEvidenceAsync(
+        ExecuteDesktopActionRequestDto request,
+        ForegroundWindowSnapshot? trustedWindow,
+        string? expectedApplicationTargetBinding,
+        CancellationToken cancellationToken,
+        ApplicationSearchWorkflow? workflow = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (!request.Confirmed)
@@ -72,7 +97,8 @@ public sealed class DesktopActionEntryService(
         }
 
         var device = RequireStartedHost().LocalDevice!;
-        var normalized = Normalize(request, trustedWindow, expectedApplicationTargetBinding);
+        cancellationToken.ThrowIfCancellationRequested();
+        var normalized = Normalize(request, trustedWindow, expectedApplicationTargetBinding, workflow);
         var now = timeProvider.GetUtcNow();
         var command = new CommandRecord
         {
@@ -99,12 +125,12 @@ public sealed class DesktopActionEntryService(
             .ConfigureAwait(false);
         if (!registration.Accepted)
         {
-            return new DesktopActionResultDto(
+            return new ApplicationSearchExecution(new DesktopActionResultDto(
                 registration.Command.Id,
                 null,
                 false,
                 "这个操作请求已经处理过，不会重复执行。",
-                true);
+                true), null);
         }
 
         var invocationId = Guid.NewGuid();
@@ -120,7 +146,8 @@ public sealed class DesktopActionEntryService(
                 normalized.WindowTitle,
                 normalized.Argument,
                 normalized.WindowIdentity,
-                normalized.ApplicationTargetBinding)),
+                normalized.ApplicationTargetBinding,
+                workflow)),
             [new SkillResourceScope(
                 normalized.ScopeType,
                 null,
@@ -162,6 +189,12 @@ public sealed class DesktopActionEntryService(
                 .ConfigureAwait(false);
             var succeeded = result.Status == SkillExecutionStatus.Succeeded
                             && final?.Succeeded == true;
+            ApplicationSearchWorkflowResult? workflowEvidence = null;
+            if (workflow is not null && succeeded)
+            {
+                workflowEvidence = RequireWorkflowEvidence(final?.DataJson, workflow);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
             await store.CompleteCommandAsync(
                 command.Id,
                 succeeded ? CommandStatus.Processed : CommandStatus.Failed,
@@ -183,7 +216,9 @@ public sealed class DesktopActionEntryService(
                     authorizationSource = NormalizeAuthorizationSource(request.AuthorizationSource),
                     processId = result.ProcessId,
                     status = result.Status.ToString(),
-                    verificationStatus = normalized.Capability is
+                    verificationStatus = workflow is not null
+                        ? "WorkflowVerified"
+                        : normalized.Capability is
                         WindowsDesktopCapabilities.OpenApplication or
                         WindowsDesktopCapabilities.SearchForeground or
                         WindowsDesktopCapabilities.DescribeForeground or
@@ -194,13 +229,13 @@ public sealed class DesktopActionEntryService(
                     resultSummary = final?.Summary
                 },
                 cancellationToken).ConfigureAwait(false);
-            return new DesktopActionResultDto(
+            return new ApplicationSearchExecution(new DesktopActionResultDto(
                 command.Id,
                 invocationId,
                 succeeded,
                 final?.Summary ?? "Windows 没有返回可确认的启动结果。",
                 false,
-                result.ProcessId);
+                result.ProcessId), workflowEvidence);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -230,6 +265,30 @@ public sealed class DesktopActionEntryService(
         }
     }
 
+    private static ApplicationSearchWorkflowResult RequireWorkflowEvidence(
+        string? json, ApplicationSearchWorkflow workflow)
+    {
+        ApplicationSearchWorkflowResult? evidence;
+        try
+        {
+            evidence = string.IsNullOrWhiteSpace(json) ? null
+                : JsonSerializer.Deserialize<ApplicationSearchWorkflowResult>(json);
+        }
+        catch (JsonException)
+        {
+            evidence = null;
+        }
+        if (evidence is null || !evidence.ApplicationVerified || !evidence.QuerySubmitted
+            || !evidence.ResultsVerified
+            || (workflow.FollowUp == ApplicationSearchFollowUp.None
+                ? evidence.FollowUpInvoked || evidence.FollowUpVerified
+                : evidence.NoResults || !evidence.FollowUpInvoked || !evidence.FollowUpVerified))
+            throw new ApplicationSearchWorkflowException(
+                "application_search_verification_failed",
+                "没有取得本次完整操作的结果证据，不能确认已完成；请查看目标应用。");
+        return evidence;
+    }
+
     private DesktopHostSnapshot RequireStartedHost()
     {
         var snapshot = hostState.Snapshot;
@@ -249,8 +308,37 @@ public sealed class DesktopActionEntryService(
     private NormalizedDesktopAction Normalize(
         ExecuteDesktopActionRequestDto request,
         ForegroundWindowSnapshot? trustedWindow,
-        string? expectedApplicationTargetBinding)
+        string? expectedApplicationTargetBinding,
+        ApplicationSearchWorkflow? workflow)
     {
+        if (string.Equals(request.ActionKind, "SearchApplication", StringComparison.Ordinal))
+        {
+            if (workflow is null || string.IsNullOrWhiteSpace(expectedApplicationTargetBinding)
+                || !string.Equals(request.Target, workflow.ApplicationId, StringComparison.Ordinal))
+                throw new UnauthorizedAccessException("应用搜索必须通过本次明确确认的会话计划执行。");
+            workflow.Validate();
+            var application = adapter.Applications.SingleOrDefault(item =>
+                string.Equals(item.Id, workflow.ApplicationId, StringComparison.Ordinal));
+            if (application is null || !InstalledApplicationCatalog.TargetBindingMatches(
+                    application, expectedApplicationTargetBinding))
+                throw new InstalledApplicationResolutionException(
+                    InstalledApplicationErrorCodes.TargetChanged,
+                    "应用目标在确认后发生变化，本次没有打开或搜索；请重新确认。");
+            if (!InstalledApplicationCatalog.IsAllowedLaunchTarget(application))
+                throw new InstalledApplicationResolutionException(
+                    InstalledApplicationErrorCodes.TargetNotAllowed,
+                    "这个应用目标不符合安全启动要求，本次没有执行操作。");
+            return new NormalizedDesktopAction(
+                request.ActionKind,
+                WindowsDesktopCapabilities.ApplicationSearchWorkflow,
+                "ApplicationSearch",
+                application.Id,
+                workflow.ToCanonicalTarget(expectedApplicationTargetBinding),
+                application.Id,
+                Argument: workflow.Query,
+                ApplicationTargetBinding: expectedApplicationTargetBinding);
+        }
+
         if (string.Equals(request.ActionKind, "OpenApplication", StringComparison.Ordinal))
         {
             var application = adapter.Applications.FirstOrDefault(item =>
@@ -430,4 +518,8 @@ public sealed class DesktopActionEntryService(
         string? Argument = null,
         ForegroundWindowSnapshot? WindowIdentity = null,
         string? ApplicationTargetBinding = null);
+
+    internal sealed record ApplicationSearchExecution(
+        DesktopActionResultDto Result,
+        ApplicationSearchWorkflowResult? Evidence);
 }

@@ -10,13 +10,15 @@ public sealed class TaskCancellationService(
         Guid taskId,
         Guid sourceDeviceId,
         Guid? commandId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? expectedVersion = null)
     {
         var accepted = await store.RequestCancellationAsync(
             taskId,
             sourceDeviceId,
             commandId,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            expectedVersion).ConfigureAwait(false);
         if (accepted)
         {
             registry.RequestCancellation(taskId);

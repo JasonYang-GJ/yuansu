@@ -7,6 +7,7 @@ using ScreenGuide.Core.Sessions;
 using ScreenGuide.Core.Tasking;
 using ScreenGuide.DesktopProtocol;
 using ScreenGuide.Skills.Windows;
+using ScreenGuide.Skills.Abstractions;
 using ScreenGuide.Vision.Abstractions;
 using AgentTaskStatus = ScreenGuide.Core.Tasking.TaskStatus;
 
@@ -43,6 +44,7 @@ public sealed class SessionCoordinator
     private readonly IEnumerable<ISessionMemoryConsentPublicationObserver> memoryConsentPublicationObservers;
     private readonly IForegroundWindowContextProvider foregroundWindows;
     private readonly TimeProvider timeProvider;
+    private readonly ApplicationSearchProgressChannel applicationSearchProgress;
     private readonly SemaphoreSlim _currentSessionGate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, ActiveSessionWork> _activeWork = new();
     private readonly ConcurrentDictionary<Guid, ActiveTaskMonitor> _taskMonitors = new();
@@ -69,7 +71,8 @@ public sealed class SessionCoordinator
         PointerRegionUnderstandingService pointerRegions,
         IEnumerable<ISessionMemoryConsentPublicationObserver> memoryConsentPublicationObservers,
         IForegroundWindowContextProvider foregroundWindows,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        ApplicationSearchProgressChannel? applicationSearchProgress = null)
     {
         this.sessionStore = sessionStore;
         this.projections = projections;
@@ -86,6 +89,7 @@ public sealed class SessionCoordinator
         this.memoryConsentPublicationObservers = memoryConsentPublicationObservers;
         this.foregroundWindows = foregroundWindows;
         this.timeProvider = timeProvider;
+        this.applicationSearchProgress = applicationSearchProgress ?? new ApplicationSearchProgressChannel();
     }
 
     public async Task<LocalSessionSnapshot?> GetCurrentAsync(
@@ -667,7 +671,8 @@ public sealed class SessionCoordinator
     public async Task<LocalSessionSnapshot> CancelTurnAsync(
         Guid sessionId,
         Guid turnId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? expectedVersion = null)
     {
         RequireStartedHost();
         var gate = await operationGates.AcquireTurnAsync(turnId, cancellationToken)
@@ -682,6 +687,8 @@ public sealed class SessionCoordinator
         {
             session = await RequireSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
             turn = await RequireTurnAsync(session, turnId, cancellationToken).ConfigureAwait(false);
+            if (expectedVersion is { } expected && turn.Version != expected)
+                throw new InvalidOperationException("entity_version_mismatch");
             phaseAtCancellation = turn.Phase;
             taskIdAtCancellation = turn.TaskId;
             operationIdAtCancellation = turn.OperationId;
@@ -1010,7 +1017,7 @@ public sealed class SessionCoordinator
             await TryEndTurnAsync(
                     turn.Id,
                     SessionTurnPhase.Failed,
-                    "session_request_failed",
+                    FriendlyExceptionCode(exception, "session_request_failed"),
                     FriendlyException(exception))
                 .ConfigureAwait(false);
         }
@@ -1035,6 +1042,8 @@ public sealed class SessionCoordinator
         {
             try
             {
+                if (string.Equals(turn.IntentKind, nameof(UniversalIntentKind.OpenFile), StringComparison.Ordinal))
+                    assistantCommands.ValidateFilePlanForContinuation(turn.PlanId);
                 var prepared = await TransitionAsync(
                         turn.Id,
                         current => current with
@@ -1074,7 +1083,7 @@ public sealed class SessionCoordinator
                 await TryEndTurnAsync(
                         turn.Id,
                         SessionTurnPhase.Failed,
-                        "session_execution_failed",
+                        FriendlyExceptionCode(exception, "session_execution_failed"),
                         FriendlyException(exception))
                     .ConfigureAwait(false);
             }
@@ -1122,7 +1131,8 @@ public sealed class SessionCoordinator
                 turn.Id,
                 semanticRoute,
                 persistedIntent,
-                cancellationToken)
+                cancellationToken,
+                confirmedPlanId: executeReadyPlan ? turn.PlanId : null)
             .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (!MatchesExpectedAction(turn, plan.IntentKind, plan.CanonicalTarget))
@@ -1148,6 +1158,31 @@ public sealed class SessionCoordinator
         }
 
         var kind = ParseIntentKind(plan.IntentKind);
+        if (executeReadyPlan
+            && (kind is UniversalIntentKind.ApplicationSearch or UniversalIntentKind.OpenApplication
+                || turn.IntentKind is nameof(UniversalIntentKind.ApplicationSearch) or nameof(UniversalIntentKind.OpenApplication))
+            && (!string.Equals(turn.IntentKind, plan.IntentKind, StringComparison.Ordinal)
+                || !string.Equals(turn.PlanTarget, plan.CanonicalTarget, StringComparison.Ordinal)))
+        {
+            await TransitionAsync(
+                    turn.Id,
+                    current => current with
+                    {
+                        PlanId = null,
+                        Phase = SessionTurnPhase.Failed,
+                        MissingContext = SessionMissingContext.None,
+                        ConfirmationGranted = false,
+                        ResultSummary = "应用、搜索内容或后续操作在确认后发生变化，本次没有执行；请重新下达指令。",
+                        FailureCode = "confirmed_target_mismatch",
+                        FailureMessage = "应用搜索计划与刚才确认的完整操作范围不一致。",
+                        CompletedAtUtc = timeProvider.GetUtcNow()
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            return;
+        }
+        if (executeReadyPlan && kind == UniversalIntentKind.OpenApplication)
+            assistantCommands.ValidateApplicationPlanForContinuation(turn.PlanId, plan.PlanId);
         var plannedWindow = kind is UniversalIntentKind.DescribeForeground
             or UniversalIntentKind.SearchForeground
             ? ResolvePlannedWindow(plan.ForegroundApplication)
@@ -1324,7 +1359,7 @@ public sealed class SessionCoordinator
                         Phase = SessionTurnPhase.WaitingForConfirmation,
                         MissingContext = SessionMissingContext.Confirmation,
                         ProjectId = turn.ProjectId ?? session.SelectedProjectId,
-                        FilePath = turn.FilePath,
+                        FilePath = kind == UniversalIntentKind.OpenFile ? plan.CanonicalTarget : turn.FilePath,
                         WindowHandle = plannedWindow?.WindowHandle,
                         WindowTitle = plannedWindow?.WindowTitle,
                         WindowProcessName = plannedWindow?.ProcessName,
@@ -1400,6 +1435,8 @@ public sealed class SessionCoordinator
             return;
         }
 
+        using var progressSubscription = applicationSearchProgress.Observe((progress, reportCancellation) =>
+            PublishApplicationSearchProgressAsync(running.Id, operationId, progress, cancellationToken, reportCancellation));
         var result = await assistantCommands.ExecuteAsync(
                 new ExecuteAssistantCommandRequestDto(
                     plan.PlanId,
@@ -1439,6 +1476,34 @@ public sealed class SessionCoordinator
                 },
                 CancellationToken.None)
             .ConfigureAwait(false);
+    }
+
+    private async Task PublishApplicationSearchProgressAsync(Guid turnId, string operationId,
+        ApplicationSearchProgress progress, CancellationToken operationCancellation, CancellationToken reportCancellation)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(operationCancellation, reportCancellation);
+        await using var gate = await operationGates.AcquireTurnAsync(turnId, linked.Token).ConfigureAwait(false);
+        linked.Token.ThrowIfCancellationRequested();
+        var current = await sessionStore.GetTurnAsync(turnId, linked.Token).ConfigureAwait(false);
+        if (current is null || current.Phase != SessionTurnPhase.Executing || current.CancellationRequested
+            || current.IntentKind != nameof(UniversalIntentKind.ApplicationSearch)
+            || current.OperationId != operationId) return;
+        var session = await sessionStore.GetSessionAsync(current.SessionId, linked.Token).ConfigureAwait(false);
+        if (session?.IsCurrent != true) return;
+        var application = progress.ApplicationName?.Trim() ?? "软件";
+        if (application.Length is < 1 or > 120 || application.Any(char.IsControl)) application = "软件";
+        var message = progress.Stage switch
+        {
+            ApplicationSearchStage.Opening => $"正在打开{application}…",
+            ApplicationSearchStage.Opened => $"已打开{application}，准备搜索…",
+            ApplicationSearchStage.ResolvingMusic => "正在查找最近发行的歌曲…",
+            ApplicationSearchStage.PreparingSearch => "正在准备搜索框…",
+            ApplicationSearchStage.Searching => "正在搜索…",
+            ApplicationSearchStage.VerifyingResults => "正在检查搜索结果…",
+            _ => throw new ArgumentOutOfRangeException(nameof(progress))
+        };
+        if (current.ResultSummary == message) return;
+        await TransitionAsync(turnId, turn => turn with { ResultSummary = message }, linked.Token).ConfigureAwait(false);
     }
 
     private async Task PreparePointerAnswerConsentAsync(
@@ -2627,7 +2692,8 @@ public sealed class SessionCoordinator
         string.Equals(inputModality, "Voice", StringComparison.OrdinalIgnoreCase)
         && kind is UniversalIntentKind.OpenApplication
             or UniversalIntentKind.OpenWebsite
-            or UniversalIntentKind.SearchForeground;
+            or UniversalIntentKind.SearchForeground
+            or UniversalIntentKind.ApplicationSearch;
 
     private void RemoveActiveWork(Guid turnId)
     {
@@ -2701,6 +2767,10 @@ public sealed class SessionCoordinator
                         CancellationRequested = phase == SessionTurnPhase.Cancelled,
                         FailureCode = failureCode,
                         FailureMessage = failureMessage,
+                        ResultSummary = phase == SessionTurnPhase.Failed
+                            && turn.IntentKind is nameof(UniversalIntentKind.ApplicationSearch) or nameof(UniversalIntentKind.OpenApplication)
+                                ? failureMessage
+                                : turn.ResultSummary,
                         CompletedAtUtc = timeProvider.GetUtcNow()
                     },
                     CancellationToken.None)
@@ -3017,9 +3087,20 @@ public sealed class SessionCoordinator
 
     private static string FriendlyException(Exception exception) => exception switch
     {
+        ApplicationSearchWorkflowException or DesktopSearchException
+            or InstalledApplicationResolutionException or WindowIdentityException =>
+                DesktopApiErrors.FromException(exception).UserMessage,
         FileNotFoundException => "没有找到 Codex，请先安装并登录 Codex。",
         NotSupportedException => "当前 Codex 版本尚未通过兼容验证。",
         _ => "这次处理没有成功，请稍后重试。"
+    };
+
+    private static string FriendlyExceptionCode(Exception exception, string fallback) => exception switch
+    {
+        ApplicationSearchWorkflowException or DesktopSearchException
+            or InstalledApplicationResolutionException or WindowIdentityException =>
+                DesktopApiErrors.FromException(exception).Code,
+        _ => fallback
     };
 
     private sealed class ActiveSessionWork(Guid turnId)

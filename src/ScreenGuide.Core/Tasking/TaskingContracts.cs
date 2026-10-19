@@ -146,7 +146,8 @@ public interface ILocalTaskStore : IAsyncDisposable
         Guid taskId,
         Guid sourceDeviceId,
         Guid? commandId = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        long? expectedVersion = null);
 
     Task<RecoveryResult> RecoverInterruptedTasksAsync(
         DateTimeOffset recoveredAtUtc,

@@ -11,7 +11,7 @@ public sealed class DesktopClientSingleInstance : IDisposable
     private readonly CancellationTokenSource _stopping = new();
     private readonly string _activationPipe;
     private Task? _listener;
-    private Action? _activationHandler;
+    private Action<bool>? _activationHandler;
 
     private DesktopClientSingleInstance(Mutex mutex)
     {
@@ -40,9 +40,11 @@ public sealed class DesktopClientSingleInstance : IDisposable
         return new DesktopClientSingleInstance(mutex);
     }
 
-    public void SetActivationHandler(Action handler) => _activationHandler = handler;
+    public void SetActivationHandler(Action<bool> handler) => _activationHandler = handler;
+    public void SetActivationHandler(Action handler) => _activationHandler = _ => handler();
 
-    public static async Task<bool> TrySignalExistingAsync(CancellationToken cancellationToken = default)
+    public static async Task<bool> TrySignalExistingAsync(
+        CancellationToken cancellationToken = default, bool showManagement = false)
     {
         try
         {
@@ -52,7 +54,7 @@ public sealed class DesktopClientSingleInstance : IDisposable
                 PipeDirection.Out,
                 PipeOptions.Asynchronous);
             await pipe.ConnectAsync(1000, cancellationToken).ConfigureAwait(false);
-            await pipe.WriteAsync(new byte[] { 1 }, cancellationToken).ConfigureAwait(false);
+            await pipe.WriteAsync(new byte[] { showManagement ? (byte)2 : (byte)1 }, cancellationToken).ConfigureAwait(false);
             await pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
             return true;
         }
@@ -85,7 +87,7 @@ public sealed class DesktopClientSingleInstance : IDisposable
                 var signal = new byte[1];
                 if (await pipe.ReadAsync(signal, cancellationToken).ConfigureAwait(false) > 0)
                 {
-                    _activationHandler?.Invoke();
+                    if (signal[0] is 1 or 2) _activationHandler?.Invoke(signal[0] == 2);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

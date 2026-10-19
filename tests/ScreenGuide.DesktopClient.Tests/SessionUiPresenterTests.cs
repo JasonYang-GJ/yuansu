@@ -6,6 +6,22 @@ namespace ScreenGuide.DesktopClient.Tests;
 public sealed class SessionUiPresenterTests
 {
     [Theory]
+    [InlineData("正在打开网易云音乐…")]
+    [InlineData("正在查找最近发行的歌曲…")]
+    [InlineData("正在搜索…")]
+    [InlineData("正在检查搜索结果…")]
+    public void ExecutingSearchShowsTheReportedStep(string step)
+    {
+        var snapshot = Snapshot("Executing");
+        var turn = snapshot.Turns.Single() with { IntentKind = "ApplicationSearch", ResultSummary = step };
+        snapshot = snapshot with { ForegroundTurn = turn, Turns = [turn], ActiveTurns = [turn] };
+        var presentation = SessionUiPresenter.Present(snapshot);
+        Assert.Equal(step, presentation.StatusText);
+        Assert.True(presentation.ShowStop);
+        Assert.Contains(step, presentation.DetailText);
+    }
+
+    [Theory]
     [InlineData("Understanding", "正在理解", true)]
     [InlineData("Responding", "随时插话", true)]
     [InlineData("WaitingForProject", "选择一个已授权项目", false)]

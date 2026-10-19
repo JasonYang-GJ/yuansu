@@ -1,0 +1,45 @@
+# Frontend dependencies and output
+node_modules/
+dist/
+coverage/
+
+# Rust / Tauri build output
+src-tauri/target/
+target/
+src-tauri/gen/schemas/
+
+# Non-Windows assets emitted by `tauri icon` (stage 0 is Windows-only)
+src-tauri/icons/android/
+src-tauri/icons/ios/
+src-tauri/icons/icon.icns
+src-tauri/icons/icon.png
+src-tauri/icons/64x64.png
+src-tauri/icons/Square*Logo.png
+src-tauri/icons/StoreLogo.png
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+artifacts/
+tools/**/bin/
+tools/**/obj/
+.DS_Store
+Thumbs.db
+
+# Editors and local tooling
+.idea/
+.vscode/
+*.code-workspace
+
+# Tauri signing material
+*.pfx
+*.p12
+*.pem
+*.key

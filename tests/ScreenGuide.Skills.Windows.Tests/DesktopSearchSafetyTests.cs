@@ -3,6 +3,325 @@ namespace ScreenGuide.Skills.Windows.Tests;
 public sealed class DesktopSearchSafetyTests
 {
     [Fact]
+    public void SearchContainerMetadataDoesNotDisableExistingUiaOnlySearchPath()
+    {
+        var input = Control("uia-search", name: "搜索框");
+        input = input with { Snapshot = input.Snapshot with
+        { NativeSearchIdentity = "ia2:9:-10", NativeSearchUsesContainer = true, NativeSearchContainerPending = true } };
+        var driver = new FakeSearchDriver([input]);
+        Assert.True(Executor(Window(), driver).Search(Window(), "示例音乐").Verified);
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(1, driver.SubmitCount);
+    }
+
+    [Fact]
+    public void WrittenSearchWaitsForContainerRebuildAndNativeAttestedRuntimePathWithoutRetyping()
+    {
+        var input = NativeInput();
+        input = input with { Snapshot = input.Snapshot with { Name = "搜索框", NativeSearchUsesContainer = true } };
+        var driver = new FakeSearchDriver([input]) { OnRead = (read, snapshot) => read < 3 ? snapshot : snapshot with
+        {
+            RuntimeId = "new-uia-path", HasNativeSearchSemantics = read >= 5,
+            NativeSearchContainerPending = read < 5, Value = read < 5 ? "" : "示例音乐"
+        } };
+        Assert.True(Executor(Window(), driver).Search(Window(), "示例音乐").Verified);
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(1, driver.SubmitCount);
+    }
+
+    [Theory]
+    [InlineData("never-recovers")]
+    [InlineData("password")]
+    [InlineData("native-id-changed")]
+    [InlineData("focus-lost")]
+    [InlineData("context-type-changed")]
+    [InlineData("cancel")]
+    public void ContainerRebuildWaitNeverWritesAgainOrSubmitsUnsafeInput(string scenario)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var input = NativeInput();
+        input = input with { Snapshot = input.Snapshot with { Name = "搜索框", NativeSearchUsesContainer = true } };
+        var driver = new FakeSearchDriver([input]) { OnRead = (read, snapshot) =>
+        {
+            if (read < 3) return snapshot;
+            var pending = snapshot with { HasNativeSearchSemantics = false, NativeSearchContainerPending = true };
+            if (scenario == "cancel") cancellation.Cancel();
+            return scenario switch
+            {
+                "password" => pending with { IsPassword = true },
+                "native-id-changed" => pending with { NativeSearchIdentity = "different" },
+                "focus-lost" => pending with { HasKeyboardFocus = false },
+                "context-type-changed" => pending with { NativeSearchUsesContainer = false },
+                _ => pending
+            };
+        } };
+        if (scenario == "cancel")
+            Assert.ThrowsAny<OperationCanceledException>(() => Executor(Window(), driver).Search(Window(), "示例音乐", cancellation.Token));
+        else
+            Assert.Throws<DesktopSearchException>(() => Executor(Window(), driver).Search(Window(), "示例音乐", cancellation.Token));
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(0, driver.SubmitCount);
+    }
+
+    [Theory]
+    [InlineData("tag:input;text-input-type:text;name-from:placeholder;", "搜索框", true)]
+    [InlineData("tag:input;text-input-type:password;name-from:placeholder;", "搜索框", false)]
+    [InlineData("tag:input;text-input-type:text;", "搜索框", false)]
+    [InlineData("tag:input;text-input-type:text;name-from:placeholder;", "发送消息", false)]
+    public void PendingContainerStillRequiresExplicitNativeTextSearchInput(string attributes, string name, bool expected) =>
+        Assert.Equal(expected, LegacyBrowserSearchSemantics.IsLabeledTextSearchInput(attributes, name));
+
+    [Fact]
+    public void SearchContainerNeverClaimsUniquenessFromPartialOrSimpleChildEnumeration()
+    {
+        Assert.True(LegacyBrowserSearchSemantics.IsCompleteSearchEnumeration(2, 2, 2, 0, [true, true]));
+        Assert.False(LegacyBrowserSearchSemantics.IsCompleteSearchEnumeration(3, 2, 3, 1, [true, true, false]));
+        Assert.False(LegacyBrowserSearchSemantics.IsCompleteSearchEnumeration(3, 2, 3, 0, [true, true, false]));
+        Assert.False(LegacyBrowserSearchSemantics.IsCompleteSearchEnumeration(3, 3, 3, 0, [true, true, false]));
+        Assert.False(LegacyBrowserSearchSemantics.IsCompleteSearchEnumeration(2, 2, 3, 0, [true, true]));
+    }
+
+    [Theory]
+    [InlineData("valid", true)]
+    [InlineData("two-inputs", false)]
+    [InlineData("two-buttons", false)]
+    [InlineData("unlabeled-input", false)]
+    [InlineData("wrong-button", false)]
+    [InlineData("cross-window", false)]
+    [InlineData("disabled", false)]
+    [InlineData("password", false)]
+    [InlineData("wrong-identity", false)]
+    public void NativeTextSearchRequiresOneNamedInputAndOneSearchButtonInSameSmallContainer(string scenario, bool expected)
+    {
+        var input = new LegacyBrowserSearchSemantics.SearchContextPart("input", 42, 42, "input", "text", "搜索你感兴趣的内容", true);
+        var button = new LegacyBrowserSearchSemantics.SearchContextPart("button", 42, 43, "button", "", "搜索", true);
+        var parts = new List<LegacyBrowserSearchSemantics.SearchContextPart> { input, button };
+        switch (scenario)
+        {
+            case "two-inputs": parts.Add(input with { Identity = "second" }); break;
+            case "two-buttons": parts.Add(button with { Identity = "second" }); break;
+            case "unlabeled-input": parts[0] = input with { Name = "消息" }; break;
+            case "wrong-button": parts[1] = button with { Name = "发送" }; break;
+            case "cross-window": parts[1] = button with { OwnerWindow = 77 }; break;
+            case "disabled": parts[1] = button with { Available = false }; break;
+            case "password": parts[0] = input with { InputType = "password" }; break;
+            case "wrong-identity": parts[0] = input with { Identity = "other" }; break;
+        }
+        Assert.Equal(expected, LegacyBrowserSearchSemantics.IsBoundSearchContainer(parts, 42, "input"));
+    }
+
+    [Theory]
+    [InlineData("geometry")]
+    [InlineData("name")]
+    [InlineData("semantics")]
+    public void ContainerBasedSearchRejectsLayoutNameOrContainerEvidenceChanges(string change)
+    {
+        var input = NativeInput();
+        input = input with { Snapshot = input.Snapshot with { Name = "搜索框", NativeSearchUsesContainer = true } };
+        var driver = new FakeSearchDriver([input]) { OnRead = (_, snapshot) => change switch
+        {
+            "geometry" => snapshot with { Bounds = new(11, 10, 360, 30), NativeSearchIdentity = "", HasNativeSearchSemantics = false },
+            "name" => snapshot with { Name = "其他搜索框" },
+            _ => snapshot with { NativeSearchUsesContainer = false }
+        } };
+        Assert.Throws<DesktopSearchException>(() => Executor(Window(), driver).Search(Window(), "示例音乐"));
+        Assert.Equal(0, driver.SetValueCount);
+        Assert.Equal(0, driver.SubmitCount);
+    }
+
+    [Fact]
+    public void ContainerSearchRetainsUniqueInputThroughSuggestionExpansionAndAttestedFocusBorderChange()
+    {
+        var parts = new List<LegacyBrowserSearchSemantics.SearchContextPart>
+        {
+            new("input", 42, 42, "input", "text", "搜索框", true),
+            new("button", 42, 43, "button", "", "搜索", true)
+        };
+        parts.AddRange(Enumerable.Range(0, 72).Select(index =>
+            new LegacyBrowserSearchSemantics.SearchContextPart("suggestion:" + index, 42, 41, "", "", "", true)));
+        Assert.True(LegacyBrowserSearchSemantics.IsBoundSearchContainer(parts, 42, "input"));
+        parts.Add(new("nested-other-input", 42, 42, "input", "text", "搜索框", true));
+        Assert.False(LegacyBrowserSearchSemantics.IsBoundSearchContainer(parts, 42, "input"));
+
+        var input = NativeInput();
+        input = input with { Snapshot = input.Snapshot with { Name = "搜索框", NativeSearchUsesContainer = true } };
+        var driver = new FakeSearchDriver([input])
+        { OnRead = (read, snapshot) => read > 1 ? snapshot with { Bounds = new(10, 11, 361, 28) } : snapshot };
+        Assert.True(Executor(Window(), driver).Search(Window(), "示例音乐").Verified);
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(1, driver.SubmitCount);
+    }
+
+    [Fact]
+    public void NativeSearchInputCanUseVerifiedNativeFocusWhenUiaFocusIsUnsupported()
+    {
+        var attempts = 0;
+        WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(true,
+            () => throw new InvalidOperationException("target cannot receive focus"), () => { attempts++; return true; });
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public void NativeFocusFallbackCannotAuthorizeGenericInputsOrIgnoreFailedFocusReadback()
+    {
+        var attempts = 0;
+        Assert.Throws<InvalidOperationException>(() => WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(false,
+            () => throw new InvalidOperationException(), () => { attempts++; return true; }));
+        Assert.Equal(0, attempts);
+        Assert.Throws<System.Windows.Automation.ElementNotAvailableException>(() => WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(true,
+            () => throw new InvalidOperationException(), () => false));
+    }
+
+    [Fact]
+    public void BoundSearchInvokeOnlyFollowsUnsupportedUiaAndFailedNativeFocus()
+    {
+        var invokes = 0;
+        WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(true,
+            () => throw new InvalidOperationException(), () => false, () => { invokes++; return true; });
+        Assert.Equal(1, invokes);
+        WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(true,
+            () => throw new InvalidOperationException(), () => true, () => { invokes++; return true; });
+        WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(true,
+            () => { }, () => false, () => { invokes++; return true; });
+        Assert.Equal(1, invokes);
+        Assert.Throws<InvalidOperationException>(() => WindowsDesktopSearchAutomationDriver.FocusWithNativeFallback(false,
+            () => throw new InvalidOperationException(), () => false, () => { invokes++; return true; }));
+        Assert.Equal(1, invokes);
+    }
+
+    [Fact]
+    public void AsyncNativeValueUpdateAndClearButtonResizeAreReadWithoutRewriting()
+    {
+        var input = NativeInput();
+        var driver = new FakeSearchDriver([input])
+        {
+            OnRead = (read, snapshot) => read >= 3 ? snapshot with
+            {
+                Value = read < 5 ? "" : "示例音乐",
+                Bounds = new DesktopSearchBounds(10, 10, 360, 30)
+            } : snapshot
+        };
+        Assert.True(Executor(Window(), driver).Search(Window(), "示例音乐").Verified);
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(1, driver.SubmitCount);
+    }
+
+    [Theory]
+    [InlineData("wrong-value")]
+    [InlineData("focus-changed")]
+    [InlineData("native-id-changed")]
+    [InlineData("native-geometry-not-attested")]
+    [InlineData("offscreen")]
+    public void AsyncNativeReadbackNeverSubmitsThroughInvalidEvidence(string scenario)
+    {
+        var driver = new FakeSearchDriver([NativeInput()])
+        {
+            OnRead = (read, snapshot) => read < 3 ? snapshot : scenario switch
+            {
+                "wrong-value" => snapshot with { Value = "其他" },
+                "focus-changed" => snapshot with { Value = "", HasKeyboardFocus = false },
+                "native-id-changed" => snapshot with { Value = "", NativeSearchIdentity = "ia2:9:-11" },
+                "native-geometry-not-attested" => snapshot with { NativeSearchIdentity = "", HasNativeSearchSemantics = false, Bounds = new(10, 10, 360, 30) },
+                _ => snapshot with { IsOffscreen = true }
+            }
+        };
+        Assert.Throws<DesktopSearchException>(() => Executor(Window(), driver).Search(Window(), "示例音乐"));
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(0, driver.SubmitCount);
+    }
+
+    [Fact]
+    public void CancellationWhileNativeValueIsUpdatingPreventsEnter()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var driver = new FakeSearchDriver([NativeInput()])
+        {
+            OnRead = (read, snapshot) =>
+            {
+                if (read < 3) return snapshot;
+                cancellation.Cancel();
+                return snapshot with { Value = "" };
+            }
+        };
+        Assert.ThrowsAny<OperationCanceledException>(() => Executor(Window(), driver).Search(Window(), "示例音乐", cancellation.Token));
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(0, driver.SubmitCount);
+    }
+
+    private static DesktopSearchControl NativeInput()
+    {
+        var input = Control("native", name: "公开占位内容");
+        return input with { Snapshot = input.Snapshot with { NativeSearchIdentity = "ia2:9:-10", HasNativeSearchSemantics = true } };
+    }
+
+    [Fact]
+    public void RotatingPlaceholderOnSameNativeSearchInputDoesNotInvalidateTarget()
+    {
+        var input = Control("native", name: "公开推荐甲");
+        input = input with { Snapshot = input.Snapshot with { NativeSearchIdentity = "ia2:9:-10", HasNativeSearchSemantics = true } };
+        var driver = new FakeSearchDriver([input]) { OnRead = (read, snapshot) => snapshot with { Name = "公开推荐" + read } };
+        Assert.True(Executor(Window(), driver).Search(Window(), "示例音乐").Verified);
+        Assert.Equal(1, driver.SetValueCount);
+        Assert.Equal(1, driver.SubmitCount);
+    }
+
+    [Fact]
+    public void ChangingNameWithoutIndependentNativeSearchIdentityStillFailsClosed()
+    {
+        var driver = new FakeSearchDriver([Control("generic", name: "搜索框")])
+        { OnRead = (_, snapshot) => snapshot with { Name = "消息输入框" } };
+        Assert.Throws<DesktopSearchException>(() => Executor(Window(), driver).Search(Window(), "示例音乐"));
+        Assert.Equal(0, driver.SetValueCount);
+    }
+
+    [Fact]
+    public void NativeSearchTypeRecognizesPlaceholderAndDeduplicatesOnlyTheSameNativeObject()
+    {
+        var first = Control("one", name: "推荐歌曲") with { Snapshot = Control("one", name: "推荐歌曲").Snapshot with {
+            NativeSearchIdentity = "ia2:9:-10", HasNativeSearchSemantics = true } };
+        var alias = first with { NativeReference = "two", Snapshot = first.Snapshot with { RuntimeId = "two" } };
+        var driver = new FakeSearchDriver([first, alias]);
+        Assert.True(Executor(Window(), driver).Search(Window(), "最近最热的歌").Verified);
+        Assert.Equal(1, driver.SetValueCount); Assert.Equal(1, driver.SubmitCount);
+    }
+
+    [Fact]
+    public void DistinctNativeSearchInputsAreStillAmbiguous()
+    {
+        var first = Control("one", name: "推荐歌曲");
+        first = first with { Snapshot = first.Snapshot with { NativeSearchIdentity = "ia2:9:-10", HasNativeSearchSemantics = true } };
+        var second = first with { NativeReference = "two", Snapshot = first.Snapshot with { RuntimeId = "two", NativeSearchIdentity = "ia2:9:-11" } };
+        var driver = new FakeSearchDriver([first, second]);
+        Assert.Throws<DesktopSearchException>(() => Executor(Window(), driver).Search(Window(), "音乐"));
+        Assert.Equal(0, driver.SetValueCount);
+    }
+
+    [Fact]
+    public void ChangingNativeIdentityOrCancellationPreventsSubmission()
+    {
+        var first = Control("one", name: "Search");
+        first = first with { Snapshot = first.Snapshot with { NativeSearchIdentity = "ia2:9:-10", HasNativeSearchSemantics = true } };
+        var driver = new FakeSearchDriver([first]) { OnRead = (_, s) => s with { NativeSearchIdentity = "ia2:9:-11" } };
+        Assert.Throws<DesktopSearchException>(() => Executor(Window(), driver).Search(Window(), "音乐"));
+        Assert.Equal(0, driver.SetValueCount);
+        using var cancelled = new CancellationTokenSource();
+        driver = new FakeSearchDriver([Control("one", name: "Search")]) { BeforeSubmitSend = (_, _) => cancelled.Cancel() };
+        Assert.Throws<OperationCanceledException>(() => Executor(Window(), driver).Search(Window(), "音乐", cancelled.Token));
+        Assert.Equal(0, driver.SubmitCount);
+    }
+
+    [Theory]
+    [InlineData("tag:input;text-input-type:search;", true)]
+    [InlineData("class:anything;tag:input;text-input-type:search;", true)]
+    [InlineData("tag:input;text-input-type:password;", false)]
+    [InlineData("tag:textarea;text-input-type:search;", false)]
+    [InlineData("tag:input;class:fake\\;text-input-type:search;", false)]
+    [InlineData("tag:input;text-input-type:text;text-input-type:search;", false)]
+    [InlineData("tag:input;text-input-type:search", false)]
+    public void NativeAttributesMustDescribeAnUnambiguousSearchInput(string attributes, bool expected)
+        => Assert.Equal(expected, LegacyBrowserSearchSemantics.IsSearchInput(attributes));
+
+    [Fact]
     public void UniqueStrongCandidateWritesExactQueryAndSubmitsOnce()
     {
         var expected = Window();

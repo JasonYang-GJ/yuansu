@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using ScreenGuide.Skills.Abstractions;
 
 namespace ScreenGuide.Core.Security;
@@ -32,6 +33,7 @@ public sealed class CapabilityPolicyEngine
             ["windows.safe-launch"] = new HashSet<string>(StringComparer.Ordinal)
             {
                 "desktop.application.open",
+                "desktop.application.search",
                 "desktop.website.open",
                 "browser.open",
                 "browser.open.visible-in-app",
@@ -130,6 +132,10 @@ public sealed class CapabilityPolicyEngine
             "desktop.application.open" =>
                 string.Equals(scope.ScopeType, "Application", StringComparison.Ordinal)
                 && scope.ResourceId is null,
+            "desktop.application.search" =>
+                string.Equals(scope.ScopeType, "ApplicationSearch", StringComparison.Ordinal)
+                && scope.ResourceId is null
+                && MatchesApplicationSearchScope(request.InputJson, scope.ScopeValue),
             "desktop.website.open" =>
                 string.Equals(scope.ScopeType, "Website", StringComparison.Ordinal)
                 && scope.ResourceId is null,
@@ -151,4 +157,27 @@ public sealed class CapabilityPolicyEngine
             _ => false
         };
     }
+
+    private static bool MatchesApplicationSearchScope(string inputJson, string scopeValue)
+    {
+        try
+        {
+            var input = JsonSerializer.Deserialize<ApplicationSearchScopeInput>(inputJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (input?.ApplicationSearch is null || input.ActionKind != "SearchApplication"
+                || input.ApplicationSearch.ApplicationId != input.Target
+                || input.ApplicationSearch.Query != input.Argument
+                || string.IsNullOrWhiteSpace(input.ApplicationTargetBinding)) return false;
+            input.ApplicationSearch.Validate();
+            return string.Equals(scopeValue,
+                input.ApplicationSearch.ToCanonicalTarget(input.ApplicationTargetBinding), StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is JsonException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private sealed record ApplicationSearchScopeInput(string? ActionKind, string? Target, string? Argument,
+        string? ApplicationTargetBinding, ApplicationSearchWorkflow? ApplicationSearch);
 }
