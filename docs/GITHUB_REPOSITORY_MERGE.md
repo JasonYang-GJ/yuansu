@@ -10,9 +10,9 @@
 | 内置灵动岛、前端与原生组件测试 | [src/Yuanshu.Island](../src/Yuanshu.Island) |
 | 完整产品构建与安装更新 | [统一构建指南](UNIFIED_PRODUCT_BUILD.md) |
 | 合并和真实使用验收范围 | [合并验收](UNIFIED_PRODUCT_ACCEPTANCE.md)、[真实使用](UNIFIED_PRODUCT_REAL_USAGE.md) |
-| 旧独立项目历史 | [JasonYang-GJ/yuanshu-island](https://github.com/JasonYang-GJ/yuanshu-island)，仍为私有仓库，需访问权限 |
+| 旧独立项目历史 | [JasonYang-GJ/yuanshu-island](https://github.com/JasonYang-GJ/yuanshu-island)，私有只读归档，需访问权限 |
 
-旧仓库保留原文件与历史，只补充迁移入口；不再作为当前产品的开发或构建来源。原 `36df1f47287227e74b50f1335502b718850df9bb` 提交及当时未提交的整合修改是导入起点，详见 [导入清单](imports/ISLAND_SOURCE_IMPORT.json)。清单描述导入当时的文件，不要求后续组件修改继续匹配旧摘要。原私有仓库完整历史不导入公开仓库。
+按所有者确认，旧仓库归档为只读，保留原文件、提交历史和分支，并补充迁移入口；不再作为当前产品的开发或构建来源。导入前的已提交代码另保存到旧仓库的 `codex/island-history-20261020` 分支。原 `36df1f47287227e74b50f1335502b718850df9bb` 提交及当时未提交的整合修改是导入起点，详见 [导入清单](imports/ISLAND_SOURCE_IMPORT.json)。清单描述导入当时的文件，不要求后续组件修改继续匹配旧摘要。原私有仓库完整历史不导入公开仓库。
 
 本次同步基于元枢 `e5796b84469a6b9b051e457c6e94de1b0cbce213`。公开前，逐项复核 R10 构建清单的 598 个源文件，全部匹配，原清单 SHA-256 为 `0E1F0953B779040DCD85C44D43A4C9ED6C54D0CC838F78A9FFE1D34B0D81AF29`。因此沿用这份精确源码的既有构建和验收证据，不把上传操作描述成重新完成真人或安装测试。Git 可能按仓库规则规范化文本换行；这不改变历史安装包身份。
 

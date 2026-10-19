@@ -10,7 +10,7 @@ A Windows desktop AI assistant for Chinese conversation, local window understand
 
 本仓库以元枢为主产品，灵动岛源码已纳入 `src/Yuanshu.Island`，作为内置功能统一构建、安装和更新。仓库远程地址仍沿用此前的 `yuansu`，历史名称不影响安装身份。
 
-**元枢与超级灵动岛现统一在本仓库维护。** 灵动岛的当前代码见 [内置组件](src/Yuanshu.Island)，完整产品见 [统一构建指南](docs/UNIFIED_PRODUCT_BUILD.md)。原 `yuanshu-island` 私有仓库保留历史与迁移说明，后续开发和问题反馈统一到这里；无需再克隆或安装两个项目。详见 [仓库合并说明](docs/GITHUB_REPOSITORY_MERGE.md)。
+**元枢与超级灵动岛现统一在本仓库维护。** 灵动岛的当前代码见 [内置组件](src/Yuanshu.Island)，完整产品见 [统一构建指南](docs/UNIFIED_PRODUCT_BUILD.md)。原 `yuanshu-island` 私有仓库已归档为只读，保留历史与迁移说明；后续开发和问题反馈统一到这里，无需再克隆或安装两个项目。详见 [仓库合并说明](docs/GITHUB_REPOSITORY_MERGE.md)。
 
 **当前状态：V0.8.0 内置灵动岛合并候选。最近冻结版仍为 V0.6.0；历史真实指针问答及正式分发门禁不会因本次合并自动通过。源码公开不等于正式签名版发布。**
 
